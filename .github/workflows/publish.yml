@@ -1,0 +1,266 @@
+name: CI Publish
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check_wrapper:
+    name: Validate Gradle Wrapper
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone repo
+        uses: actions/checkout@v4 # Updated to v4 (standard stable)
+
+      - name: Validate Gradle Wrapper
+        uses: gradle/actions/wrapper-validation@v3 # Updated to v3
+
+  # --- NEW JOB: Compile Deno OCR Server ---
+  build_ocr:
+    name: Build OCR Binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Deno
+        uses: denoland/setup-deno@v1
+        with:
+          deno-version: v1.x
+
+      - name: Compile OCR Server
+        working-directory: ocr-server
+        run: |
+          mkdir -p dist
+          
+          # Linux x64
+          deno compile --allow-net --allow-read --allow-write --allow-env --target x86_64-unknown-linux-gnu --output dist/ocr-server-linux server.ts
+          
+          # Windows x64
+          deno compile --allow-net --allow-read --allow-write --allow-env --target x86_64-pc-windows-msvc --output dist/ocr-server-win.exe server.ts
+          
+          # macOS x64 (Intel)
+          deno compile --allow-net --allow-read --allow-write --allow-env --target x86_64-apple-darwin --output dist/ocr-server-macos server.ts
+          
+          # macOS ARM64 (Apple Silicon) - Optional, can fallback to x64 via Rosetta or use specific binary if needed
+          deno compile --allow-net --allow-read --allow-write --allow-env --target aarch64-apple-darwin --output dist/ocr-server-macos-arm64 server.ts
+
+      - name: Upload OCR Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ocr-binaries
+          path: ocr-server/dist/*
+
+  build:
+    name: Build Jar
+    needs: [check_wrapper, build_ocr] # Added dependency on build_ocr
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout ${{ github.ref }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          path: master
+          fetch-depth: 0
+
+      # --- NEW STEP: Inject OCR Binaries into Resources ---
+      - name: Download OCR Binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: ocr-binaries
+          # This puts the binaries where Gradle will include them in the JAR
+          path: Suwayomi-Server/server/src/main/resources/ocr-binaries
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: 25
+          distribution: 'zulu'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Copy CI gradle.properties
+        run: |
+          cd master
+          mkdir -p ~/.gradle
+          cp .github/runner-files/ci-gradle.properties \
+            ~/.gradle/gradle.properties
+
+      - name: Build and copy webUI, Build Jar
+        env:
+          ProductBuildType: "Stable"
+        working-directory: master
+        # ShadowJar will automatically pick up the files in src/main/resources
+        run: ./gradlew :server:downloadWebUI :server:shadowJar --stacktrace
+
+      - name: Upload Jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: jar
+          path: Suwayomi-Server/server/build/*.jar
+          if-no-files-found: error
+
+      - name: Upload icons
+        uses: actions/upload-artifact@v4
+        with:
+          name: icon
+          path: Suwayomi-Server/server/src/main/resources/icon
+          if-no-files-found: error
+
+      - name: Tar scripts dir to maintain file permissions
+        run: tar -cvzf scripts.tar.gz -C master/ scripts/
+
+      - name: Upload scripts.tar.gz
+        uses: actions/upload-artifact@v4
+        with:
+          name: scripts
+          path: scripts.tar.gz
+          if-no-files-found: error
+
+  jlink:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x64
+          - os: windows-latest
+            name: windows-x64
+          - os: macos-14
+            name: macOS-arm64
+          - os: macos-13
+            name: macOS-x64
+        os: [ubuntu-latest, windows-latest, macos-14, macos-13]
+
+    steps:
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: 25
+          distribution: 'zulu'
+
+      - name: Package JDK
+        run: jlink --add-modules java.base,java.compiler,java.datatransfer,java.desktop,java.instrument,java.logging,java.management,java.naming,java.prefs,java.scripting,java.se,java.security.jgss,java.security.sasl,java.sql,java.transaction.xa,java.xml,jdk.attach,jdk.crypto.ec,jdk.jdi,jdk.management,jdk.net,jdk.unsupported,jdk.unsupported.desktop,jdk.zipfs,jdk.accessibility --output suwa --strip-debug --no-man-pages --no-header-files --compress=2
+
+      - name: Upload JDK package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}-jre
+          path: suwa
+
+  bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: debian-all
+            jre: linux-x64
+          - name: appimage
+            jre: linux-x64
+          - name: linux-assets
+            jre: linux-assets
+          - name: linux-x64
+            jre: linux-x64
+          - name: macOS-x64
+            jre: macOS-x64
+          - name: macOS-arm64
+            jre: macOS-arm64
+          - name: windows-x64
+            jre: windows-x64
+        name: [debian-all, appimage, linux-assets, linux-x64, macOS-x64, macOS-arm64, windows-x64]
+
+    name: Make ${{ matrix.name }} release
+    needs: [build, jlink]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Jar
+        uses: actions/download-artifact@v4
+        with:
+          name: jar
+          path: Suwayomi-Server/server/build
+
+      - name: Download JRE
+        uses: actions/download-artifact@v4
+        if: matrix.name != 'linux-assets' && matrix.name != 'debian-all'
+        with:
+          name: ${{ matrix.jre }}-jre
+          path: jre
+
+      - name: Download icons
+        uses: actions/download-artifact@v4
+        with:
+          name: icon
+          path: Suwayomi-Server/server/src/main/resources/icon
+
+      - name: Download scripts.tar.gz
+        uses: actions/download-artifact@v4
+        with:
+          name: scripts
+
+      - name: Make ${{ matrix.name }} release
+        run: |
+          mkdir upload/
+          tar -xvpf scripts.tar.gz
+          scripts/bundler.sh -o upload/ ${{ matrix.name }}
+
+      - name: Upload ${{ matrix.name }} files
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: upload/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: jar
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: debian-all
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: appimage
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-assets
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-x64
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: macOS-x64
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: macOS-arm64
+          path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-x64
+          path: release
+
+      - name: Generate checksums
+        run: cd release && sha256sum * > Checksums.sha256
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          draft: true
+          files: release/*
