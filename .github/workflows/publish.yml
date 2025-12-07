@@ -163,13 +163,32 @@ jobs:
         run: |
           curl -L "https://github.com/Suwayomi/Suwayomi-Server-preview/releases/download/v2.1.2019/Suwayomi-Server-v2.1.2019.jar" -o bin/mangatan/resources/suwayomi-server.jar
 
-      # 4. WebUI (Specified URL)
+# 4. WebUI (Robust Unzip)
       - name: Download and Setup WebUI
         shell: bash
         run: |
+          # 1. Download
           curl -L "https://github.com/KolbyML/Suwayomi-WebUI/releases/download/v1.0.7/Suwayomi-WebUI-v1.0.7.zip" -o webui.zip
-          unzip webui.zip -d bin/mangatan/resources/
-          mv bin/mangatan/resources/Suwayomi-WebUI-v1.0.7 bin/mangatan/resources/suwayomi-webui
+          
+          # 2. Unzip to a temporary staging folder
+          mkdir webui_temp
+          unzip webui.zip -d webui_temp
+          
+          # 3. Create destination
+          mkdir -p bin/mangatan/resources/suwayomi-webui
+
+          # 4. Move files (Handle both Nested Folder and Flat Zip cases)
+          # If the temp folder contains exactly one directory, move THAT directory's contents
+          if [ $(ls -1 webui_temp | wc -l) -eq 1 ] && [ -d "webui_temp/$(ls webui_temp)" ]; then
+            echo "Detected nested folder in zip. Moving contents..."
+            mv webui_temp/$(ls webui_temp)/* bin/mangatan/resources/suwayomi-webui/
+          else
+            echo "Detected flat zip. Moving contents..."
+            mv webui_temp/* bin/mangatan/resources/suwayomi-webui/
+          fi
+
+          # 5. Cleanup
+          rm -rf webui_temp webui.zip
 
       # --- COMPILATION ---
       - name: Build Rust Binary
