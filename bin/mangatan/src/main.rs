@@ -143,14 +143,17 @@ async fn run_server(
         .spawn()?;
 
     println!("☕ Spawning Suwayomi (Port 4567)...");
-    let mut suwayomi_proc = Command::new(&java_exec)
+    let mut suwayomi_cmd = Command::new(&java_exec);
+    suwayomi_cmd
         .arg("-Dsuwayomi.tachidesk.config.server.webUIEnabled=false")
+        .arg("-XX:+ExitOnOutOfMemoryError")
         .arg("-jar")
         .arg(&jar_path)
-        .kill_on_drop(true) // This works when the handle is dropped
+        .kill_on_drop(true)
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()?;
+        .stderr(Stdio::inherit());
+    println!("DEBUG Executing Suwayomi: {:?}", suwayomi_cmd);
+    let mut suwayomi_proc = suwayomi_cmd.spawn()?;
 
     println!("🌍 Starting Web Interface at http://localhost:8080");
     let client = Client::new();
