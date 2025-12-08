@@ -40,12 +40,12 @@ jobs:
           path: ocr-server/dist/*
 
   # --- JOB 2: Build Custom JREs ---
-  jlink:
+jlink:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         include:
-          - os: ubuntu-20.04 # Use 20.04 for Linux JRE too
+          - os: ubuntu-20.04
             name: linux-x64
           - os: windows-latest
             name: windows-x64
@@ -57,11 +57,12 @@ jobs:
       - name: Set up JDK
         uses: actions/setup-java@v4
         with:
-          java-version: 25
+          java-version: 21 # SWITCHED TO LTS (25 is EA and breaks scanners)
           distribution: 'zulu'
 
       - name: Package JDK
-        run: jlink --add-modules java.base,java.compiler,java.datatransfer,java.desktop,java.instrument,java.logging,java.management,java.naming,java.prefs,java.scripting,java.se,java.security.jgss,java.security.sasl,java.sql,java.transaction.xa,java.xml,jdk.attach,jdk.crypto.ec,jdk.jdi,jdk.management,jdk.net,jdk.unsupported,jdk.unsupported.desktop,jdk.zipfs,jdk.accessibility --output suwa --strip-debug --no-man-pages --no-header-files --compress=2
+        # Added: --bind-services, jdk.charsets, jdk.localedata
+        run: jlink --add-modules java.base,java.compiler,java.datatransfer,java.desktop,java.instrument,java.logging,java.management,java.naming,java.prefs,java.scripting,java.se,java.security.jgss,java.security.sasl,java.sql,java.transaction.xa,java.xml,jdk.attach,jdk.crypto.ec,jdk.jdi,jdk.management,jdk.net,jdk.unsupported,jdk.unsupported.desktop,jdk.zipfs,jdk.accessibility,jdk.charsets,jdk.localedata --bind-services --output suwa --strip-debug --no-man-pages --no-header-files --compress=2
 
       - name: Upload JDK package
         uses: actions/upload-artifact@v4
