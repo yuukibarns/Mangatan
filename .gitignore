@@ -145,6 +145,8 @@ vite.config.ts.timestamp-*
 bin/mangatan/resources/suwayomi-webui
 bin/mangatan/resources/ocr-server*
 bin/mangatan/resources/Suwayomi-Server.jar
+bin/mangatan/resources/jre_bundle.zip
 target
 .DS_Store
 ocr-cache.json
+jre_bundle

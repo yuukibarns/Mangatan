@@ -3,6 +3,7 @@ use std::{
     io::{self, Cursor, Write},
     path::{Path, PathBuf},
     process::Stdio,
+    sync::mpsc::{self, Receiver, Sender},
     thread,
 };
 
@@ -23,7 +24,7 @@ use eframe::{
 use futures::TryStreamExt;
 use reqwest::Client;
 use rust_embed::RustEmbed;
-use tokio::{process::Command, sync::mpsc};
+use tokio::process::Command;
 use tower_http::cors::{Any, CorsLayer};
 
 const ICON_BYTES: &[u8] = include_bytes!("../resources/faviconlogo.png");
@@ -49,14 +50,19 @@ const OCR_BYTES: &[u8] = include_bytes!("../resources/ocr-server-macos-x64");
 struct FrontendAssets;
 
 fn main() -> eframe::Result<()> {
-    let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
+
+    let (server_stopped_tx, server_stopped_rx) = mpsc::channel::<()>();
 
     thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
         rt.block_on(async {
+            let _guard = ServerGuard {
+                tx: server_stopped_tx,
+            };
+
             if let Err(err) = run_server(&mut shutdown_rx).await {
                 eprintln!("Server crashed: {err}");
-                std::process::exit(1);
             }
         });
     });
@@ -75,103 +81,144 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Mangatan",
         options,
-        Box::new(|_cc| Ok(Box::new(MyApp::new(shutdown_tx)))),
+        Box::new(|_cc| Ok(Box::new(MyApp::new(shutdown_tx, server_stopped_rx)))),
     )
 }
 
+struct ServerGuard {
+    tx: Sender<()>,
+}
+impl Drop for ServerGuard {
+    fn drop(&mut self) {
+        let _ = self.tx.send(()); // Tell GUI we are done
+    }
+}
+
 struct MyApp {
-    _shutdown_tx: mpsc::Sender<()>,
+    shutdown_tx: tokio::sync::mpsc::Sender<()>,
+    server_stopped_rx: Receiver<()>,
+    is_shutting_down: bool,
 }
 
 impl MyApp {
-    fn new(tx: mpsc::Sender<()>) -> Self {
-        Self { _shutdown_tx: tx }
+    fn new(shutdown_tx: tokio::sync::mpsc::Sender<()>, server_stopped_rx: Receiver<()>) -> Self {
+        Self {
+            shutdown_tx,
+            server_stopped_rx,
+            is_shutting_down: false,
+        }
     }
 }
 
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(20.0);
-                ui.heading("Mangatan is Running");
-                ui.add_space(20.0);
-                if ui
-                    .add(egui::Button::new("Open Web UI").min_size([120.0, 40.0].into()))
-                    .clicked()
-                {
-                    if let Err(err) = open::that("http://localhost:4568/library") {
-                        eprintln!("Failed to open web browser: {err}");
-                    }
-                }
-                ui.add_space(10.0);
-                ui.label("Close this window to stop the Mangatan.");
+        if ctx.input(|i| i.viewport().close_requested()) {
+            if !self.is_shutting_down {
+                self.is_shutting_down = true;
+                println!("❌ Close requested. Signaling server to stop...");
+
+                let _ = self.shutdown_tx.try_send(());
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
+
+        if self.is_shutting_down {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(50.0);
+                    ui.heading("Stopping Servers...");
+                    ui.add_space(10.0);
+                    ui.spinner();
+                    ui.label("Cleaning up child processes. Please wait.");
+                });
             });
-        });
+
+            if self.server_stopped_rx.try_recv().is_ok() {
+                println!("✅ Server cleanup complete. Exiting.");
+                std::process::exit(0);
+            }
+
+            ctx.request_repaint();
+        } else {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(20.0);
+                    ui.heading("Mangatan Launcher");
+                    ui.add_space(20.0);
+                    if ui.button("Open Web UI").clicked() {
+                        let _ = open::that("http://localhost:4568");
+                    }
+                });
+            });
+        }
     }
 }
 
-async fn run_server(shutdown_signal: &mut mpsc::Receiver<()>) -> Result<(), Box<anyhow::Error>> {
+async fn run_server(
+    shutdown_signal: &mut tokio::sync::mpsc::Receiver<()>,
+) -> Result<(), Box<anyhow::Error>> {
     println!("🚀 Initializing Mangatan Launcher...");
 
-    let proj_dirs = ProjectDirs::from("com", "mangatan", "server")
+    let proj_dirs = ProjectDirs::from("", "", "mangatan")
         .ok_or(anyhow!("Could not determine home directory"))?;
     let data_dir = proj_dirs.data_dir();
 
-    if !data_dir.exists() {
-        fs::create_dir_all(data_dir)
-            .map_err(|err| anyhow!("Failed to create data directory: {err:?}"))?;
-    }
     println!("📂 Data Directory: {}", data_dir.display());
 
-    println!("📦 Extracting assets...");
-    let jar_name = "suwayomi-server.jar";
-
-    let old_jar_path = data_dir.join("Suwayomi-Server.jar");
-    if old_jar_path.exists() {
-        let _ = fs::remove_file(old_jar_path);
+    if data_dir.exists() {
+        if let Err(err) = fs::remove_dir_all(data_dir) {
+            eprintln!("⚠️ Warning: Could not fully clear data directory: {err}");
+            eprintln!(
+                "   (This usually means an old process is still running. Check Task Manager.)"
+            );
+        }
     }
 
-    let jar_path = extract_file(data_dir, jar_name, JAR_BYTES)
-        .map_err(|err| anyhow!("Failed to extract {}: {err:?}", jar_name))?;
+    if !data_dir.exists() {
+        fs::create_dir_all(data_dir).map_err(|err| anyhow!("Failed to create data dir {err:?}"))?;
+    }
+    let bin_dir = data_dir.join("bin");
+    if !bin_dir.exists() {
+        fs::create_dir_all(&bin_dir).map_err(|err| anyhow!("Failed to create bin dir {err:?}"))?;
+    }
+
+    println!("📦 Extracting assets...");
+    let jar_name = "Suwayomi-Server.jar";
+    let jar_path = extract_file(&bin_dir, jar_name, JAR_BYTES)
+        .map_err(|err| anyhow!("Failed to extract {jar_name} {err:?}"))?;
 
     let ocr_bin_name = if cfg!(target_os = "windows") {
         "ocr-server.exe"
     } else {
         "ocr-server"
     };
-    let ocr_path = extract_executable(data_dir, ocr_bin_name, OCR_BYTES)
-        .map_err(|err| anyhow!("Failed to extract ocr server: {err:?}"))?;
+    let ocr_path = extract_executable(&bin_dir, ocr_bin_name, OCR_BYTES)
+        .map_err(|err| anyhow!("Failed to extract ocr server {err:?}"))?;
 
     let java_exec =
-        resolve_java(data_dir).map_err(|err| anyhow!("Failed to resolve java runtime: {err:?}"))?;
+        resolve_java(data_dir).map_err(|err| anyhow!("Failed to resolve java install {err:?}"))?;
 
-    println!("👁️ Spawning OCR (Port 3033)...");
+    println!("👁️ Spawning OCR...");
     let mut ocr_proc = Command::new(&ocr_path)
         .arg("--port")
         .arg("3033")
-        .kill_on_drop(true) // This works when the handle is dropped
+        .kill_on_drop(true)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()
-        .map_err(|err| anyhow!("Failed to spawn ocr server: {err:?}"))?;
+        .map_err(|err| anyhow!("Failed to launch ocr server {err:?}"))?;
 
-    println!("☕ Spawning Suwayomi (Port 4567)...");
-    let mut suwayomi_cmd = Command::new(&java_exec);
-    suwayomi_cmd
+    println!("☕ Spawning Suwayomi...");
+    let mut suwayomi_proc = Command::new(&java_exec)
         .arg("-Dsuwayomi.tachidesk.config.server.webUIEnabled=false")
         .arg("-XX:+ExitOnOutOfMemoryError")
-        .arg("--enable-native-access=ALL-UNNAMED")
-        .arg("--add-opens=java.desktop/sun.awt=ALL-UNNAMED")
-        .arg("--add-opens=java.desktop/javax.swing=ALL-UNNAMED")
         .arg("-jar")
         .arg(&jar_path)
         .kill_on_drop(true)
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-    let mut suwayomi_proc = suwayomi_cmd
+        .stderr(Stdio::inherit())
         .spawn()
-        .map_err(|err| anyhow!("Failed to spawn suwayomi server: {err:?}"))?;
+        .map_err(|err| anyhow!("Failed to launch suwayomi {err:?}"))?;
 
     println!("🌍 Starting Web Interface at http://localhost:4568");
     let client = Client::new();
@@ -195,38 +242,30 @@ async fn run_server(shutdown_signal: &mut mpsc::Receiver<()>) -> Result<(), Box<
 
     let server_future = axum::serve(listener, app).into_future();
 
+    println!("✅ Servers Running. Waiting for shutdown signal...");
+
     tokio::select! {
-        status = suwayomi_proc.wait() => {
-            eprintln!("❌ CRITICAL: Suwayomi Server crashed or exited!");
-            if let Ok(s) = status {
-                eprintln!("   Exit Code: {:?}", s.code());
-            }
-        }
-        status = ocr_proc.wait() => {
-            eprintln!("❌ CRITICAL: OCR Server crashed or exited!");
-             if let Ok(s) = status {
-                eprintln!("   Exit Code: {:?}", s.code());
-            }
-        }
-        _ = server_future => {
-            eprintln!("❌ CRITICAL: Web Server (Launcher) stopped unexpectedly!");
-        }
-        // Wait for the shutdown signal from the Tray Menu
+        _ = suwayomi_proc.wait() => { eprintln!("❌ Suwayomi exited unexpectedly"); }
+        _ = ocr_proc.wait() => { eprintln!("❌ OCR exited unexpectedly"); }
+        _ = server_future => { eprintln!("❌ Web server exited unexpectedly"); }
         _ = shutdown_signal.recv() => {
-            println!("🛑 Shutdown signal received. Stopping servers...");
+            println!("🛑 Shutdown signal received via GUI.");
         }
     }
 
-    println!("🛑 Cleaning up background processes...");
+    println!("🛑 terminating child processes...");
 
-    // Explicitly killing just to be sure, though dropping the handles below would trigger
-    // kill_on_drop
     if let Err(err) = suwayomi_proc.kill().await {
-        eprintln!("Failed to kill Suwayomi process: {err}");
+        eprintln!("Error killing Suwayomi: {err}");
     }
+    let _ = suwayomi_proc.wait().await;
+    println!("   Suwayomi terminated.");
+
     if let Err(err) = ocr_proc.kill().await {
-        eprintln!("Failed to kill OCR process: {err}");
+        eprintln!("Error killing OCR: {err}");
     }
+    let _ = ocr_proc.wait().await;
+    println!("   OCR terminated.");
 
     Ok(())
 }
