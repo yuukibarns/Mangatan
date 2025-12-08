@@ -1,4 +1,5 @@
 use std::{
+    env,
     fs::{self, File},
     io::{self, Cursor, Write},
     path::{Path, PathBuf},
@@ -26,6 +27,8 @@ use reqwest::Client;
 use rust_embed::RustEmbed;
 use tokio::process::Command;
 use tower_http::cors::{Any, CorsLayer};
+use tracing::{error, info};
+use tracing_subscriber::EnvFilter;
 
 const ICON_BYTES: &[u8] = include_bytes!("../resources/faviconlogo.png");
 const JAR_BYTES: &[u8] = include_bytes!("../resources/Suwayomi-Server.jar");
@@ -50,6 +53,12 @@ const OCR_BYTES: &[u8] = include_bytes!("../resources/ocr-server-macos-x64");
 struct FrontendAssets;
 
 fn main() -> eframe::Result<()> {
+    let rust_log = env::var(EnvFilter::DEFAULT_ENV).unwrap_or_default();
+    let env_filter = match rust_log.is_empty() {
+        true => EnvFilter::builder().parse_lossy("info"),
+        false => EnvFilter::builder().parse_lossy(rust_log),
+    };
+    tracing_subscriber::fmt().with_env_filter(env_filter).init();
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
 
     let (server_stopped_tx, server_stopped_rx) = mpsc::channel::<()>();
@@ -62,7 +71,7 @@ fn main() -> eframe::Result<()> {
             };
 
             if let Err(err) = run_server(&mut shutdown_rx).await {
-                eprintln!("Server crashed: {err}");
+                error!("Server crashed: {err}");
             }
         });
     });
@@ -115,7 +124,7 @@ impl eframe::App for MyApp {
         if ctx.input(|i| i.viewport().close_requested()) {
             if !self.is_shutting_down {
                 self.is_shutting_down = true;
-                println!("❌ Close requested. Signaling server to stop...");
+                info!("❌ Close requested. Signaling server to stop...");
 
                 let _ = self.shutdown_tx.try_send(());
             }
@@ -134,7 +143,7 @@ impl eframe::App for MyApp {
             });
 
             if self.server_stopped_rx.try_recv().is_ok() {
-                println!("✅ Server cleanup complete. Exiting.");
+                info!("✅ Server cleanup complete. Exiting.");
                 std::process::exit(0);
             }
 
@@ -157,20 +166,18 @@ impl eframe::App for MyApp {
 async fn run_server(
     shutdown_signal: &mut tokio::sync::mpsc::Receiver<()>,
 ) -> Result<(), Box<anyhow::Error>> {
-    println!("🚀 Initializing Mangatan Launcher...");
+    info!("🚀 Initializing Mangatan Launcher...");
 
     let proj_dirs = ProjectDirs::from("", "", "mangatan")
         .ok_or(anyhow!("Could not determine home directory"))?;
     let data_dir = proj_dirs.data_dir();
 
-    println!("📂 Data Directory: {}", data_dir.display());
+    info!("📂 Data Directory: {}", data_dir.display());
 
     if data_dir.exists() {
         if let Err(err) = fs::remove_dir_all(data_dir) {
-            eprintln!("⚠️ Warning: Could not fully clear data directory: {err}");
-            eprintln!(
-                "   (This usually means an old process is still running. Check Task Manager.)"
-            );
+            error!("⚠️ Warning: Could not fully clear data directory: {err}");
+            error!("   (This usually means an old process is still running. Check Task Manager.)");
         }
     }
 
@@ -182,7 +189,7 @@ async fn run_server(
         fs::create_dir_all(&bin_dir).map_err(|err| anyhow!("Failed to create bin dir {err:?}"))?;
     }
 
-    println!("📦 Extracting assets...");
+    info!("📦 Extracting assets...");
     let jar_name = "Suwayomi-Server.jar";
     let jar_path = extract_file(&bin_dir, jar_name, JAR_BYTES)
         .map_err(|err| anyhow!("Failed to extract {jar_name} {err:?}"))?;
@@ -198,7 +205,7 @@ async fn run_server(
     let java_exec =
         resolve_java(data_dir).map_err(|err| anyhow!("Failed to resolve java install {err:?}"))?;
 
-    println!("👁️ Spawning OCR...");
+    info!("👁️ Spawning OCR...");
     let mut ocr_proc = Command::new(&ocr_path)
         .arg("--port")
         .arg("3033")
@@ -208,7 +215,7 @@ async fn run_server(
         .spawn()
         .map_err(|err| anyhow!("Failed to launch ocr server {err:?}"))?;
 
-    println!("☕ Spawning Suwayomi...");
+    info!("☕ Spawning Suwayomi...");
     let mut suwayomi_proc = Command::new(&java_exec)
         .arg("-Dsuwayomi.tachidesk.config.server.initialOpenInBrowserEnabled=false")
         .arg("-Dsuwayomi.tachidesk.config.server.webUIChannel=BUNDLED")
@@ -224,7 +231,7 @@ async fn run_server(
         .spawn()
         .map_err(|err| anyhow!("Failed to launch suwayomi {err:?}"))?;
 
-    println!("🌍 Starting Web Interface at http://localhost:4568");
+    info!("🌍 Starting Web Interface at http://localhost:4568");
     let client = Client::new();
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -246,30 +253,30 @@ async fn run_server(
 
     let server_future = axum::serve(listener, app).into_future();
 
-    println!("✅ Servers Running. Waiting for shutdown signal...");
+    info!("✅ Servers Running. Waiting for shutdown signal...");
 
     tokio::select! {
-        _ = suwayomi_proc.wait() => { eprintln!("❌ Suwayomi exited unexpectedly"); }
-        _ = ocr_proc.wait() => { eprintln!("❌ OCR exited unexpectedly"); }
-        _ = server_future => { eprintln!("❌ Web server exited unexpectedly"); }
+        _ = suwayomi_proc.wait() => { error!("❌ Suwayomi exited unexpectedly"); }
+        _ = ocr_proc.wait() => { error!("❌ OCR exited unexpectedly"); }
+        _ = server_future => { error!("❌ Web server exited unexpectedly"); }
         _ = shutdown_signal.recv() => {
-            println!("🛑 Shutdown signal received via GUI.");
+            info!("🛑 Shutdown signal received via GUI.");
         }
     }
 
-    println!("🛑 terminating child processes...");
+    info!("🛑 terminating child processes...");
 
     if let Err(err) = suwayomi_proc.kill().await {
-        eprintln!("Error killing Suwayomi: {err}");
+        error!("Error killing Suwayomi: {err}");
     }
     let _ = suwayomi_proc.wait().await;
-    println!("   Suwayomi terminated.");
+    info!("   Suwayomi terminated.");
 
     if let Err(err) = ocr_proc.kill().await {
-        eprintln!("Error killing OCR: {err}");
+        error!("Error killing OCR: {err}");
     }
     let _ = ocr_proc.wait().await;
-    println!("   OCR terminated.");
+    info!("   OCR terminated.");
 
     Ok(())
 }
@@ -327,7 +334,7 @@ async fn proxy_request(
                 .expect("Failed to build proxied response")
         }
         Err(err) => {
-            println!("Proxy Error to {target_url}: {err}");
+            info!("Proxy Error to {target_url}: {err}");
             Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
                 .body(Body::empty())
@@ -403,7 +410,7 @@ fn resolve_java(data_dir: &Path) -> std::io::Result<PathBuf> {
         let java_path = jre_dir.join("bin").join(bin_name);
 
         if !java_path.exists() {
-            println!("📦 Extracting Embedded JRE...");
+            info!("📦 Extracting Embedded JRE...");
             if jre_dir.exists() {
                 let _ = fs::remove_dir_all(&jre_dir);
             }
@@ -425,7 +432,7 @@ fn resolve_java(data_dir: &Path) -> std::io::Result<PathBuf> {
 
     #[cfg(not(feature = "embed-jre"))]
     {
-        println!("🛠️ Development Mode: Using System Java");
+        info!("🛠️ Development Mode: Using System Java");
         let bin_name = if cfg!(target_os = "windows") {
             "java.exe"
         } else {
