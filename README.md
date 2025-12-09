@@ -9,6 +9,8 @@ Download the latest release from the [Releases](https://github.com/KolbyML/Manga
 
 Run the executable, then visit http://127.0.0.1:4568/ in your web browser to access the Mangatan web interface.
 
+https://github.com/user-attachments/assets/38c63c86-289d-45a4-ba85-e29f1b812ceb
+
 ## Setup (Windows)
 
 1. Download the .zip file for `windows-x86` from the [releases](https://github.com/KolbyML/Mangatan/releases) page.
