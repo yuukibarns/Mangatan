@@ -40,8 +40,15 @@ jobs:
       with:
         cache-on-failure: true
 
+    - name: Install NASM
+      uses: ilammy/setup-nasm@v1
+
     - name: Prepare Resources
-      run: make setup-depends
+      run: |
+        make download_jar
+        make download_natives
+        mkdir -p bin/mangatan/resources/suwayomi-webui
+        touch bin/mangatan/resources/suwayomi-webui/index.html
   
     - name: Run Clippy
       run: |
@@ -75,8 +82,15 @@ jobs:
       with:
         cache-on-failure: true      
 
+    - name: Install NASM
+      uses: ilammy/setup-nasm@v1
+
     - name: Prepare Resources
-      run: make setup-depends          
+      run: |
+        make download_jar
+        make download_natives
+        mkdir -p bin/mangatan/resources/suwayomi-webui
+        touch bin/mangatan/resources/suwayomi-webui/index.html      
 
     - name: Test
       run: cargo test --release --workspace -- --nocapture
