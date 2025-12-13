@@ -3576,6 +3576,7 @@ dependencies = [
  "base64",
  "bytes",
  "chrome_lens_ocr",
+ "futures",
  "image",
  "reqwest",
  "serde",
