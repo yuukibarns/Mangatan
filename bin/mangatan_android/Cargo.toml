@@ -32,24 +32,33 @@ request_legacy_external_storage = true
 crate-type = ["cdylib"]
 
 [target.'cfg(target_os = "android")'.dependencies]
-android-activity = { version = "0.6", features = ["native-activity"] }
-axum.workspace = true
-eframe = { version = "0.33", default-features = false, features = ["wgpu", "android-native-activity" ] }
-egui = "0.33"
-futures.workspace = true
-jni.workspace = true
-lazy_static.workspace = true
-libc.workspace = true
-libloading.workspace = true
-mangatan-ocr-server.workspace = true
-mime_guess.workspace = true
-openssl.workspace = true
-reqwest.workspace = true
-tar.workspace = true
-tokio.workspace = true
-tokio-tungstenite.workspace = true
-tower-http.workspace = true
-tracing.workspace = true
-tracing-log.workspace = true
-tracing-subscriber.workspace = true
+# GUI
+eframe = { version = "0.29", default-features = false, features = ["wgpu", "android-native-activity" ] }
+egui = "0.29"
 winit = "0.30"
+
+# Web Server & Networking
+# IMPORTANT: reqwest 0.12 uses http 1.0, matching axum 0.7
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+axum = { version = "0.8.7", features = ["macros", "multipart", "ws"] }
+tower-http = { version = "0.5", features = ["cors", "fs", "trace"] }
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+mime_guess = "2"
+
+# WebSockets
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls-native-roots"] }
+
+# System
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-log = "0.2"
+libc = "0.2"
+jni = "0.21"
+libloading = "0.8"
+tar = "0.4"
+lazy_static = "1.4"
+mangatan-ocr-server.workspace = true
+openssl = { version = "0.10", features = ["vendored"] }
+
+android-activity = { version = "0.6", features = ["native-activity"] }

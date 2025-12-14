@@ -487,9 +487,9 @@ async fn proxy_request(
 fn axum_to_tungstenite(msg: Message) -> Option<TungsteniteMessage> {
     match msg {
         Message::Text(t) => Some(TungsteniteMessage::Text(t.as_str().into())),
-        Message::Binary(b) => Some(TungsteniteMessage::Binary(b)),
-        Message::Ping(p) => Some(TungsteniteMessage::Ping(p)),
-        Message::Pong(p) => Some(TungsteniteMessage::Pong(p)),
+        Message::Binary(b) => Some(TungsteniteMessage::Binary(b.to_vec())),
+        Message::Ping(p) => Some(TungsteniteMessage::Ping(p.to_vec())),
+        Message::Pong(p) => Some(TungsteniteMessage::Pong(p.to_vec())),
         Message::Close(c) => {
             let frame = c.map(|cf| tokio_tungstenite::tungstenite::protocol::CloseFrame {
                 code: CloseCode::from(cf.code),
