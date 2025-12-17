@@ -271,7 +271,7 @@ fn android_main(app: AndroidApp) {
 
     let app_gui = app.clone();
     let mut options = eframe::NativeOptions::default();
-    
+
     if sdk_version <= 29 {
         info!("SDK <= 29: Forcing OpenGL (GLES) backend for compatibility.");
         options.wgpu_options.supported_backends = eframe::wgpu::Backends::GL;
@@ -643,93 +643,50 @@ fn start_background_services(app: AndroidApp, files_dir: PathBuf) {
             }
         }
 
+        let jar_path_abs = jar_path.canonicalize().unwrap_or(jar_path.clone());
+        trace!("Classpath: {:?}", jar_path_abs);
+        let mut options_vec = Vec::new();
+
+        options_vec.push(format!("-Djava.class.path={}", jar_path_abs.display()));
+        options_vec.push(format!("-Djava.home={}", jre_root.display()));
+        options_vec.push(format!("-Djava.io.tmpdir={}", tmp_dir.display()));
+
+        options_vec.push("-Djava.net.preferIPv4Stack=true".to_string());
+        options_vec.push("-Djava.net.preferIPv6Addresses=false".to_string());
+        options_vec.push("-Xmx512m".to_string());
+        options_vec.push("-Xms256m".to_string());
+        options_vec.push("-XX:TieredStopAtLevel=1".to_string());
+        options_vec.push("-Dsuwayomi.tachidesk.config.server.webUIChannel=BUNDLED".to_string());
+        options_vec.push(
+            "-Dsuwayomi.tachidesk.config.server.initialOpenInBrowserEnabled=false".to_string(),
+        );
+        options_vec.push("-Dsuwayomi.tachidesk.config.server.systemTrayEnabled=false".to_string());
+        options_vec.push(
+            "-Dsuwayomi.tachidesk.config.server.rootDir={}"
+                .to_string()
+                .replace("{}", &tachidesk_data.to_string_lossy()),
+        );
+
+        let mut jni_options: Vec<jni::sys::JavaVMOption> = options_vec
+            .iter()
+            .map(|s| {
+                let cstr = CString::new(s.as_str()).unwrap();
+                jni::sys::JavaVMOption {
+                    optionString: cstr.into_raw(),
+                    extraInfo: std::ptr::null_mut(),
+                }
+            })
+            .collect();
+
+        info!("Creating JVM with {} options", jni_options.len());
+
         let create_vm_fn = lib_jvm
             .get::<JniCreateJavaVM>(b"JNI_CreateJavaVM\0")
             .unwrap();
-
-        info!("Configuring JVM...");
-        let jar_path_abs = jar_path.canonicalize().unwrap_or(jar_path.clone());
-        trace!("Classpath: {:?}", jar_path_abs);
-
-        let classpath_opt =
-            CString::new(format!("-Djava.class.path={}", jar_path_abs.display())).unwrap();
-        let home_opt = CString::new(format!("-Djava.home={}", jre_root.display())).unwrap();
-        let root_dir_opt = CString::new(format!(
-            "-Dsuwayomi.tachidesk.config.server.rootDir={}",
-            tachidesk_data.display()
-        ))
-        .unwrap();
-        let bundled_webui_opt =
-            CString::new("-Dsuwayomi.tachidesk.config.server.webUIChannel=BUNDLED").unwrap();
-        let tmp_opt = CString::new(format!("-Djava.io.tmpdir={}", tmp_dir.display())).unwrap();
-        let ipv4_opt = CString::new("-Djava.net.preferIPv4Stack=true").unwrap();
-        let no_ipv6_opt = CString::new("-Djava.net.preferIPv6Addresses=false").unwrap();
-        let xmx_opt = CString::new("-Xmx512m").unwrap();
-        let xms_opt = CString::new("-Xms128m").unwrap();
-        let tiered_opt = CString::new("-XX:TieredStopAtLevel=1").unwrap();
-        let no_tray =
-            CString::new("-Dsuwayomi.tachidesk.config.server.systemTrayEnabled=false").unwrap();
-        let initialOpenInBrowserEnabled =
-            CString::new("-Dsuwayomi.tachidesk.config.server.initialOpenInBrowserEnabled=false")
-                .unwrap();
-
-        let _ = std::env::set_current_dir(&tachidesk_data);
-
-        let mut options = vec![
-            jni::sys::JavaVMOption {
-                optionString: no_tray.as_ptr() as *mut _,
-                extraInfo: std::ptr::null_mut(),
-            },
-            jni::sys::JavaVMOption {
-                optionString: initialOpenInBrowserEnabled.as_ptr() as *mut _,
-                extraInfo: std::ptr::null_mut(),
-            },
-            jni::sys::JavaVMOption {
-                optionString: xmx_opt.as_ptr() as *mut _,
-                extraInfo: std::ptr::null_mut(),
-            },
-            jni::sys::JavaVMOption {
-                optionString: xms_opt.as_ptr() as *mut _,
-                extraInfo: std::ptr::null_mut(),
-            },
-            jni::sys::JavaVMOption {
-                optionString: tiered_opt.as_ptr() as *mut _,
-                extraInfo: std::ptr::null_mut(),
-            },
-            jni::sys::JavaVMOption {
-                optionString: classpath_opt.as_ptr() as *mut _,
-                extraInfo: std::ptr::null_mut(),
-            },
-            jni::sys::JavaVMOption {
-                optionString: home_opt.as_ptr() as *mut _,
-                extraInfo: std::ptr::null_mut(),
-            },
-            jni::sys::JavaVMOption {
-                optionString: tmp_opt.as_ptr() as *mut _,
-                extraInfo: std::ptr::null_mut(),
-            },
-            jni::sys::JavaVMOption {
-                optionString: root_dir_opt.as_ptr() as *mut _,
-                extraInfo: std::ptr::null_mut(),
-            },
-            jni::sys::JavaVMOption {
-                optionString: bundled_webui_opt.as_ptr() as *mut _,
-                extraInfo: std::ptr::null_mut(),
-            },
-            jni::sys::JavaVMOption {
-                optionString: ipv4_opt.as_ptr() as *mut _,
-                extraInfo: std::ptr::null_mut(),
-            },
-            jni::sys::JavaVMOption {
-                optionString: no_ipv6_opt.as_ptr() as *mut _,
-                extraInfo: std::ptr::null_mut(),
-            },
-        ];
-
         let mut vm_args = jni::sys::JavaVMInitArgs {
             version: JNI_VERSION_1_6,
-            nOptions: options.len() as i32,
-            options: options.as_mut_ptr(),
+            nOptions: jni_options.len() as i32,
+            options: jni_options.as_mut_ptr(),
             ignoreUnrecognized: 1,
         };
 
@@ -1020,7 +977,9 @@ fn get_android_sdk_version(app: &AndroidApp) -> i32 {
     let vm = unsafe { JavaVM::from_raw(vm_ptr).unwrap() };
     let mut env = vm.attach_current_thread().unwrap();
 
-    let version_cls = env.find_class("android/os/Build$VERSION").expect("Failed to find Build$VERSION");
+    let version_cls = env
+        .find_class("android/os/Build$VERSION")
+        .expect("Failed to find Build$VERSION");
     let sdk_int = env
         .get_static_field(version_cls, "SDK_INT", "I")
         .expect("Failed to get SDK_INT")
