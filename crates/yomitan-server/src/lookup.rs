@@ -74,6 +74,9 @@ impl LookupService {
         let search_text = &text[start_index..];
         let chars: Vec<char> = search_text.chars().take(24).collect();
 
+        // Reusable decoder
+        let mut decoder = snap::raw::Decoder::new();
+
         for len in (1..=chars.len()).rev() {
             let substring: String = chars[0..len].iter().collect();
             let candidates = self.generate_candidates(&substring);
@@ -90,13 +93,13 @@ impl LookupService {
 
                 let rows = stmt.query_map(rusqlite::params![candidate.word], |row| {
                     let dict_id: i64 = row.get(0)?;
-                    let json_str: String = row.get(1)?;
-                    Ok((dict_id, json_str))
+                    let compressed: Vec<u8> = row.get(1)?; // CHANGED: Fetch BLOB
+                    Ok((dict_id, compressed))
                 });
 
                 if let Ok(mapped_rows) = rows {
                     for row_result in mapped_rows {
-                        if let Ok((dict_id_raw, json_str)) = row_result {
+                        if let Ok((dict_id_raw, compressed_data)) = row_result {
                             let dict_id = DictionaryId(dict_id_raw);
 
                             // CHECK ENABLED
@@ -106,37 +109,42 @@ impl LookupService {
                                 }
                             }
 
-                            if let Ok(stored) = serde_json::from_str::<StoredRecord>(&json_str) {
-                                let estimated_len = candidate.word.chars().count();
-                                let term_obj = Term::from_parts(
-                                    Some(candidate.word.as_str()),
-                                    stored.reading.as_deref(),
-                                )
-                                .unwrap_or_else(|| {
-                                    Term::from_headword(candidate.word.clone()).unwrap()
-                                });
+                            // CHANGED: Decompress -> Deserialize
+                            if let Ok(decompressed) = decoder.decompress_vec(&compressed_data) {
+                                if let Ok(stored) =
+                                    serde_json::from_slice::<StoredRecord>(&decompressed)
+                                {
+                                    let estimated_len = candidate.word.chars().count();
+                                    let term_obj = Term::from_parts(
+                                        Some(candidate.word.as_str()),
+                                        stored.reading.as_deref(),
+                                    )
+                                    .unwrap_or_else(|| {
+                                        Term::from_headword(candidate.word.clone()).unwrap()
+                                    });
 
-                                let mut freq = 0;
-                                if let Record::YomitanGlossary(g) = &stored.record {
-                                    freq = g.popularity;
+                                    let mut freq = 0;
+                                    if let Record::YomitanGlossary(g) = &stored.record {
+                                        freq = g.popularity;
+                                    }
+
+                                    results.push(RecordEntry {
+                                        span_bytes: Span {
+                                            start: 0,
+                                            end: candidate.word.len() as u64,
+                                        },
+                                        span_chars: Span {
+                                            start: 0,
+                                            end: estimated_len as u64,
+                                        },
+                                        source: stored.dictionary_id,
+                                        term: term_obj,
+                                        record_id: RecordId(0),
+                                        record: stored.record.clone(),
+                                        profile_sorting_frequency: None,
+                                        source_sorting_frequency: Some(FrequencyValue::Rank(freq)),
+                                    });
                                 }
-
-                                results.push(RecordEntry {
-                                    span_bytes: Span {
-                                        start: 0,
-                                        end: candidate.word.len() as u64,
-                                    },
-                                    span_chars: Span {
-                                        start: 0,
-                                        end: estimated_len as u64,
-                                    },
-                                    source: stored.dictionary_id,
-                                    term: term_obj,
-                                    record_id: RecordId(0),
-                                    record: stored.record.clone(),
-                                    profile_sorting_frequency: None,
-                                    source_sorting_frequency: Some(FrequencyValue::Rank(freq)),
-                                });
                             }
                         }
                     }

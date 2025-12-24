@@ -83,6 +83,9 @@ pub fn import_zip(state: &AppState, data: &[u8]) -> Result<String> {
 
     let mut terms_found = 0;
 
+    // Create reusable encoder
+    let mut encoder = snap::raw::Encoder::new();
+
     for name in file_names {
         if name.contains("term_bank") && name.ends_with(".json") {
             info!("   -> Processing {}", name);
@@ -146,15 +149,17 @@ pub fn import_zip(state: &AppState, data: &[u8]) -> Result<String> {
                         reading: stored_reading.clone(),
                     };
 
-                    let json_val = serde_json::to_string(&stored)?;
+                    // CHANGED: Serialize to bytes -> Compress -> Insert
+                    let json_bytes = serde_json::to_vec(&stored)?;
+                    let compressed = encoder.compress_vec(&json_bytes)?;
 
                     // Insert Headword mapping
-                    stmt.execute(rusqlite::params![headword, dict_id.0, json_val])?;
+                    stmt.execute(rusqlite::params![headword, dict_id.0, compressed])?;
                     terms_found += 1;
 
                     // Insert Reading mapping
                     if let Some(r) = stored_reading {
-                        stmt.execute(rusqlite::params![r, dict_id.0, json_val])?;
+                        stmt.execute(rusqlite::params![r, dict_id.0, compressed])?;
                     }
                 }
             }

@@ -51,8 +51,9 @@ impl AppState {
         let conn = pool.get().expect("Failed to get DB connection");
 
         // 1. Initialize Tables
+        // CHANGED: Disabled WAL, changed json to BLOB
         conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
+            "PRAGMA journal_mode = DELETE;
              PRAGMA synchronous = NORMAL;
              
              CREATE TABLE IF NOT EXISTS dictionaries (
@@ -65,7 +66,7 @@ impl AppState {
              CREATE TABLE IF NOT EXISTS terms (
                 term TEXT NOT NULL,
                 dictionary_id INTEGER NOT NULL,
-                json TEXT NOT NULL
+                json BLOB NOT NULL
              );
              
              CREATE INDEX IF NOT EXISTS idx_term ON terms(term);

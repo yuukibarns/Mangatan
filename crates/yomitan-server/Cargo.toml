@@ -28,6 +28,7 @@ lindera = { version = "0.43", features = ["unidic", "compress"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.24"
+snap = "1.1"
 
 [lints]
 workspace = true
