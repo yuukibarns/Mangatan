@@ -520,10 +520,20 @@ jobs:
           cache: 'yarn'
           cache-dependency-path: 'Mangatan-WebUI/yarn.lock'
 
+      # 1. Install Rust with iOS Target
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios
+
+      # 2. Patch Xcode Project to preserve SDKROOT
+      # The 'unset SDKROOT' in your Run Script phase breaks 'ring' compilation in CI.
+      # This command comments it out so the build inherits the iOS SDK path.
+      - name: Patch Xcode Project
+        run: |
+          echo "Patching project.pbxproj to preserve SDKROOT..."
+          find bin/mangatan_ios -name "project.pbxproj" -exec sed -i '' 's/unset SDKROOT/# unset SDKROOT/g' {} +
+          echo "Patch applied."
 
       - name: Prepare iOS Assets
         run: |
@@ -531,7 +541,15 @@ jobs:
           make download_ios_jar
           make ios_jre
           make ios_framework          
-      
+
+      # 3. Pre-build Rust (Warms cache & ensures dependencies compile)
+      - name: Pre-build Rust Backend
+        run: |
+          export SDKROOT=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "Using SDKROOT: $SDKROOT"
+          cd bin/mangatan_ios/backend
+          cargo build --release --target aarch64-apple-ios
+
       - name: Build IPA
         run: |
           cd bin/mangatan_ios
@@ -546,10 +564,6 @@ jobs:
             CODE_SIGNING_ALLOWED=NO
 
           # 2. Export IPA
-          # We need an export options plist. We create a minimal AdHoc/Dev one on the fly.
-          # Since we are building unsigned/ad-hoc for now (or relying on auto-signing), 
-          # we use a manual export approach or a simple plist.
-          
           cat > ExportOptions.plist <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -563,9 +577,6 @@ jobs:
           </plist>
           EOF
           
-          # Note: Exporting usually requires signing. If you want a purely unsigned IPA (payload only),
-          # you can zip the .app inside the archive.
-          
           mkdir -p Payload
           cp -r Mangatan.xcarchive/Products/Applications/Mangatan.app Payload/
           zip -r Mangatan.ipa Payload
@@ -576,6 +587,7 @@ jobs:
           name: mangatan-ios
           path: bin/mangatan_ios/Mangatan.ipa
 
+      
   # --- JOB 6: Release (Combines Everything) ---
   release:
     if: startsWith(github.ref, 'refs/tags/v')
