@@ -101,7 +101,9 @@ async fn update_last_card_handler(
     };
 
     // 4. Update the Note
-    let sent_field = payload.sentence_field.unwrap_or_else(|| "Sentence".to_string());
+    let sent_field = payload
+        .sentence_field
+        .unwrap_or_else(|| "Sentence".to_string());
     let img_field = payload.image_field.unwrap_or_else(|| "Image".to_string());
 
     let update_payload = json!({
@@ -112,14 +114,14 @@ async fn update_last_card_handler(
                 "id": id,
                 "fields": {
                     // DYNAMICALLY USE USER FIELD NAME
-                    sent_field: payload.sentence, 
+                    sent_field: payload.sentence,
                 },
                 "picture": [{
                     "url": "https://placeholder.invalid",
                     "data": b64_image,
                     "filename": filename,
                     // DYNAMICALLY USE USER FIELD NAME
-                    "fields": [ img_field ] 
+                    "fields": [ img_field ]
                 }]
             }
         }
