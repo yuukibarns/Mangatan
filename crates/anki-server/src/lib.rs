@@ -63,7 +63,13 @@ async fn update_last_card_handler(
 
     // 2. Convert to Base64
     let b64_image = general_purpose::STANDARD.encode(&image_bytes);
-    let filename = format!("mangatan_{}.jpg", chrono::Utc::now().timestamp_millis());
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+
+    let filename = format!("mangatan_{}.jpg", timestamp);
 
     // 3. Find the Last Added Card (Mokuro Logic)
     let anki_base = "http://127.0.0.1:8765";
@@ -101,7 +107,9 @@ async fn update_last_card_handler(
     };
 
     // 4. Update the Note
-    let sent_field = payload.sentence_field.unwrap_or_else(|| "Sentence".to_string());
+    let sent_field = payload
+        .sentence_field
+        .unwrap_or_else(|| "Sentence".to_string());
     let img_field = payload.image_field.unwrap_or_else(|| "Image".to_string());
 
     let update_payload = json!({
@@ -112,14 +120,14 @@ async fn update_last_card_handler(
                 "id": id,
                 "fields": {
                     // DYNAMICALLY USE USER FIELD NAME
-                    sent_field: payload.sentence, 
+                    sent_field: payload.sentence,
                 },
                 "picture": [{
                     "url": "https://placeholder.invalid",
                     "data": b64_image,
                     "filename": filename,
                     // DYNAMICALLY USE USER FIELD NAME
-                    "fields": [ img_field ] 
+                    "fields": [ img_field ]
                 }]
             }
         }
