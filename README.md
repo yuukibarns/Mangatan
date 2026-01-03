@@ -10,8 +10,9 @@ Traditional setups for reading manga with Japanese lookup (OCR) can be complicat
 
 **Mangatan simplifies everything into a single app:**
 * **Zero Configuration:** No need to install "Monkey scripts," configure Optical Character Recognition (OCR) tools, or mess with command lines.
-* **Built-in OCR:** Just hover over Japanese text to get selectable text for dictionary lookups.
-* **Cross-Platform:** Run the exact same interface on your PC, Mac, or Android phone.
+* **Universal Language Support:** Mangatan supports every language.
+* **Built-in OCR:** Just hover over text to get selectable text for dictionary lookups.
+* **Cross-Platform:** Run the exact same interface on your PC, Mac, Android, or iOS device.
 * **Browser Interface:** Uses the familiar [Suwayomi](https://github.com/Suwayomi/Suwayomi-Server) interface in your favorite web browser.
 
 ### 🖥️ Supported Platforms
