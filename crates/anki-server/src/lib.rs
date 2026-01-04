@@ -103,11 +103,14 @@ async fn update_last_card_handler(
             .into_response();
     }
 
-    // 4. Prepare data for update
+    // 4. Prepare update payloads
+    let mut fields_map = serde_json::Map::new();
     let mut picture_data = Vec::new();
 
     // Only fetch and process image if image_field is present and valid
     if let Some(img_field) = target_image_field {
+        fields_map.insert(img_field.clone(), Value::String(String::new()));
+
         let suwayomi_url = format!("http://127.0.0.1:4567{}", payload.image_path);
 
         let image_bytes = match state.client.get(&suwayomi_url).send().await {
@@ -141,8 +144,6 @@ async fn update_last_card_handler(
         }));
     }
 
-    // Prepare sentence fields map
-    let mut fields_map = serde_json::Map::new();
     if let Some(sent_field) = target_sentence_field {
         fields_map.insert(sent_field, Value::String(payload.sentence));
     }
