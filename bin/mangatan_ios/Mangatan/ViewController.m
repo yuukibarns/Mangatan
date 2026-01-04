@@ -15,6 +15,10 @@
     [super viewDidLoad];
     self.wasReady = NO;
 
+    // --- CHECK FOR APP UPDATE & CLEAR CACHE ---
+    [self clearCacheOnAppUpdate];
+    // ------------------------------------------
+
     // 1. Setup WebView (Hidden initially)
     self.webView = [[WKWebView alloc] initWithFrame:self.view.bounds];
     self.webView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -47,11 +51,34 @@
                                                        repeats:YES];
 }
 
+- (void)clearCacheOnAppUpdate {
+    NSString *currentVersion = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+    NSString *storedVersion = [[NSUserDefaults standardUserDefaults] stringForKey:@"last_run_version"];
+
+    if (![currentVersion isEqualToString:storedVersion]) {
+        NSLog(@"[System] App updated from %@ to %@. Clearing WebView Cache...", storedVersion, currentVersion);
+        
+        // Clear WKWebView Cache
+        NSSet *websiteDataTypes = [WKWebsiteDataStore allWebsiteDataTypes];
+        NSDate *dateFrom = [NSDate dateWithTimeIntervalSince1970:0];
+        [[WKWebsiteDataStore defaultDataStore] removeDataOfTypes:websiteDataTypes
+                                                   modifiedSince:dateFrom
+                                               completionHandler:^{
+            NSLog(@"[System] Cache cleared successfully.");
+        }];
+
+        // Update the stored version so this doesn't run next time
+        [[NSUserDefaults standardUserDefaults] setObject:currentVersion forKey:@"last_run_version"];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+    } else {
+        NSLog(@"[System] Normal launch (Version %@). Keeping cache.", currentVersion);
+    }
+}
+
 - (void)checkServerStatus {
     BOOL isReady = is_server_ready();
     
     if (isReady && !self.wasReady) {
-        // Transition: Server just became ready -> Show Web
         NSLog(@"[UI] Server Ready! Loading interface...");
         [self.webView loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:@"http://127.0.0.1:4568"]]];
         
@@ -62,7 +89,6 @@
         self.wasReady = YES;
         
     } else if (!isReady && self.wasReady) {
-        // Transition: Server went down -> Show Loading
         NSLog(@"[UI] Server lost! Showing loading screen...");
         [UIView animateWithDuration:0.5 animations:^{
             self.webView.alpha = 0.0;
