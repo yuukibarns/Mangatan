@@ -47,7 +47,7 @@ async fn update_last_card_handler(
             Err(e) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to read bytes: {e}"),
+                    format!("Failed to read bytes: {e}{suwayomi_url}"),
                 )
                     .into_response();
             }
