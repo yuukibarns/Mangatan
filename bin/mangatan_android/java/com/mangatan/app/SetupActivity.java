@@ -15,7 +15,6 @@ import android.widget.TextView;
 import android.widget.Toast;
 import java.io.File;
 import java.io.FileOutputStream;
-import java.io.FileInputStream;
 
 public class SetupActivity extends Activity {
 
@@ -25,19 +24,7 @@ public class SetupActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        // Check if config already exists
-        File configFile = new File(getFilesDir(), "data_path.cfg");
-        if (configFile.exists()) {
-            // Config exists - go straight to main activity
-            launchMainActivity();
-            return;
-        }
-
-        // Config doesn't exist - show setup UI
-        showSetupUI();
-    }
-
-    private void showSetupUI() {
+        // --- Simple Programmatic UI (No XML needed) ---
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
         layout.setPadding(50, 50, 50, 50);
@@ -56,6 +43,7 @@ public class SetupActivity extends Activity {
         pathInput.setText(Environment.getExternalStorageDirectory().getAbsolutePath() + "/MangatanData");
         layout.addView(pathInput);
 
+        // Add spacer
         TextView spacer = new TextView(this);
         spacer.setHeight(40);
         layout.addView(spacer);
@@ -94,6 +82,7 @@ public class SetupActivity extends Activity {
                 Toast.makeText(this, "Permission already granted!", Toast.LENGTH_SHORT).show();
             }
         } else {
+            // Android 10 and below
             requestPermissions(new String[]{
                 android.Manifest.permission.WRITE_EXTERNAL_STORAGE,
                 android.Manifest.permission.READ_EXTERNAL_STORAGE
@@ -102,7 +91,7 @@ public class SetupActivity extends Activity {
     }
 
     private void saveAndFinish() {
-        // Check Permissions
+        // 1. Check Permissions
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             if (!Environment.isExternalStorageManager()) {
                 Toast.makeText(this, "Please grant storage permissions first", Toast.LENGTH_LONG).show();
@@ -113,7 +102,7 @@ public class SetupActivity extends Activity {
         String pathStr = pathInput.getText().toString().trim();
         File targetDir = new File(pathStr);
 
-        // Try to create the directory
+        // 2. Try to create the directory
         if (!targetDir.exists()) {
             boolean created = targetDir.mkdirs();
             if (!created && !targetDir.exists()) {
@@ -122,7 +111,7 @@ public class SetupActivity extends Activity {
             }
         }
 
-        // Write path to config file
+        // 3. Write path to Internal Storage config file
         try {
             File configFile = new File(getFilesDir(), "data_path.cfg");
             FileOutputStream fos = new FileOutputStream(configFile);
@@ -130,23 +119,19 @@ public class SetupActivity extends Activity {
             fos.close();
             
             Toast.makeText(this, "Setup Complete!", Toast.LENGTH_SHORT).show();
+
+            Intent intent = new Intent();
+            intent.setClassName(this, "com.mangatan.app.MangatanActivity");
             
-            // Launch main activity
-            launchMainActivity();
+            // Clear the stack so pressing 'back' in the app doesn't return to Setup
+            intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_NEW_TASK);
             
+            startActivity(intent);
+            
+            // Close SetupActivity
+            finish(); 
         } catch (Exception e) {
             Toast.makeText(this, "Error saving config: " + e.getMessage(), Toast.LENGTH_LONG).show();
-        }
-    }
-
-    private void launchMainActivity() {
-        try {
-            Intent intent = new Intent(this, MangatanActivity.class);
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
-            startActivity(intent);
-            finish();
-        } catch (Exception e) {
-            Toast.makeText(this, "Error launching app: " + e.getMessage(), Toast.LENGTH_LONG).show();
         }
     }
 }
