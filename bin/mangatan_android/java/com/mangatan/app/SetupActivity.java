@@ -140,10 +140,13 @@ public class SetupActivity extends Activity {
     }
 
     private void launchMainActivity() {
-        Intent intent = new Intent();
-        intent.setClassName(this, "com.mangatan.app.MangatanActivity");
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
-        startActivity(intent);
-        finish();
+        try {
+            Intent intent = new Intent(this, MangatanActivity.class);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+            startActivity(intent);
+            finish();
+        } catch (Exception e) {
+            Toast.makeText(this, "Error launching app: " + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
     }
 }
