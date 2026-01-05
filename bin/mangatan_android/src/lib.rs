@@ -331,15 +331,19 @@ fn android_main(app: AndroidApp) {
     let files_dir = app.internal_data_path().expect("Failed to get data path");
     let config_path = files_dir.join("data_path.cfg");
 
-    // --- READ CONFIG (SetupActivity ensures this exists) ---
-    let data_path_str = match fs::read_to_string(&config_path) {
-        Ok(content) => content.trim().to_string(),
-        Err(e) => {
-            error!("Failed to read config file: {:?}", e);
-            error!("This shouldn't happen - SetupActivity should have created it!");
-            return;
-        }
-    };
+    if !config_path.exists() {
+        info!("Config not found. Launching Java SetupActivity and exiting NativeActivity...");
+
+        launch_setup_activity(&app);
+
+        return; 
+    }
+
+    // --- READ CONFIG ---
+    let data_path_str = fs::read_to_string(&config_path)
+        .expect("Failed to read config file")
+        .trim()
+        .to_string();
 
     let data_root = PathBuf::from(data_path_str);
     info!("Using Data Root: {:?}", data_root);
