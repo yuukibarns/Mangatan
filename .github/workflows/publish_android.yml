@@ -7,9 +7,9 @@ on:
         description: 'Release Version (e.g. 1.0.0)'
         required: true
         type: string
-  push:
-    tags:
-      - "v*"
+
+# Remove the push.tags trigger entirely - we don't want this workflow
+# to run when tags are pushed by OTHER workflows
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -19,30 +19,8 @@ permissions:
   contents: write
 
 jobs:
-  # --- JOB 1: Create Tag (Runs ONLY on manual trigger) ---
-  create_release_tag:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.RELEASE_TOKEN }}        
-
-      - name: Create and Push Tag
-        run: |
-          VERSION="${{ inputs.version }}"
-          if [[ $VERSION != v* ]]; then VERSION="v$VERSION"; fi
-          
-          echo "Preparing to tag commit with: $VERSION"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "$VERSION" -m "Release $VERSION"
-          git push origin "$VERSION"
-
-  # --- JOB 2: Build Android APK ---
+  # --- JOB 1: Build Android APK (Now runs on workflow_dispatch) ---
   build_android:
-    if: startsWith(github.ref, 'refs/tags/v')
     name: Build Android APKs
     runs-on: ubuntu-latest
     steps:
@@ -54,7 +32,8 @@ jobs:
       - name: Update Cargo Version
         shell: bash
         run: |
-          VERSION="${{ github.ref_name }}"
+          VERSION="${{ inputs.version }}"
+          # Remove 'v' prefix if present
           CLEAN_VERSION="${VERSION#v}"
           echo "Updating workspace version from 0.1.0 to $CLEAN_VERSION..."
           
@@ -204,26 +183,50 @@ jobs:
           name: mangatan-android
           path: signed_apks/*.apk
 
-  # --- JOB 3: Release (Android Only) ---
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
+  # --- JOB 2: Create Tag & Release (Runs after build) ---
+  create_tag_and_release:
     needs: [build_android]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
         with:
-          fetch-depth: 0  
+          token: ${{ secrets.RELEASE_TOKEN }}
+          fetch-depth: 0
 
-      - name: Download Android
+      - name: Create and Push Tag
+        id: create_tag
+        run: |
+          VERSION="${{ inputs.version }}"
+          if [[ $VERSION != v* ]]; then VERSION="v$VERSION"; fi
+          
+          echo "Creating tag: $VERSION"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Check if tag already exists
+          if git rev-parse "$VERSION" >/dev/null 2>&1; then
+            echo "⚠️ Tag $VERSION already exists. Skipping tag creation."
+            echo "tag_exists=true" >> $GITHUB_OUTPUT
+          else
+            git tag -a "$VERSION" -m "Android Release $VERSION"
+            git push origin "$VERSION"
+            echo "✅ Tag $VERSION created and pushed."
+            echo "tag_exists=false" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Download Android Artifacts
         uses: actions/download-artifact@v4
         with:
           name: mangatan-android
           path: release/android
 
-      - name: Prepare Final Assets
+      - name: Prepare Release Assets
         run: |
           mkdir final_release
-          VERSION=${{ github.ref_name }}
+          VERSION="${{ steps.create_tag.outputs.version }}"
           
           # ANDROID
           mv release/android/mangatan-browser.apk final_release/Mangatan-${VERSION}-Android-Browser-Advanced-Users.apk
@@ -233,29 +236,31 @@ jobs:
         run: cd final_release && sha256sum * > Checksums.sha256
 
       - name: Generate Release Notes
-        id: release_notes
         run: |
-          CURRENT_TAG=${{ github.ref_name }}
-          PREV_TAG=$(git describe --tags --abbrev=0 "${CURRENT_TAG}^" 2>/dev/null || true)
-          echo "## Release $CURRENT_TAG" > RELEASE_NOTES.md
+          VERSION="${{ steps.create_tag.outputs.version }}"
+          PREV_TAG=$(git describe --tags --abbrev=0 "${VERSION}^" 2>/dev/null || true)
+          
+          echo "## Android Release $VERSION" > RELEASE_NOTES.md
           echo "" >> RELEASE_NOTES.md
+          echo "### 📱 Android APKs" >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "- **Recommended**: Native WebView version (better compatibility)" >> RELEASE_NOTES.md
+          echo "- **Advanced Users**: Browser version (more features, may have issues)" >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "### 📝 Changes" >> RELEASE_NOTES.md
+          
           if [ -z "$PREV_TAG" ]; then
             git log --no-merges --pretty=format:"- %s (%h)" >> RELEASE_NOTES.md
           else
-            git log "$PREV_TAG..$CURRENT_TAG" --no-merges --pretty=format:"- %s (%h)" >> RELEASE_NOTES.md
+            git log "$PREV_TAG..$VERSION" --no-merges --pretty=format:"- %s (%h)" >> RELEASE_NOTES.md
           fi
 
-      - name: Load Release Notes
-        run: |
-          echo "RELEASE_BODY<<EOF" >> $GITHUB_ENV
-          cat RELEASE_NOTES.md >> $GITHUB_ENV
-          echo "" >> $GITHUB_ENV 
-          echo "EOF" >> $GITHUB_ENV
-
-      - name: Create Release
+      - name: Create or Update Release
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ steps.create_tag.outputs.version }}
+          name: Android Release ${{ steps.create_tag.outputs.version }}
           draft: false
           body_path: RELEASE_NOTES.md
           files: final_release/*
