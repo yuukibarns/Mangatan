@@ -1,0 +1,266 @@
+name: CI Publish Android
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release Version (e.g. 1.0.0)'
+        required: true
+        type: string
+
+# Remove the push.tags trigger entirely - we don't want this workflow
+# to run when tags are pushed by OTHER workflows
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  # --- JOB 1: Build Android APK (Now runs on workflow_dispatch) ---
+  build_android:
+    name: Build Android APKs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Update Cargo Version
+        shell: bash
+        run: |
+          VERSION="${{ inputs.version }}"
+          # Remove 'v' prefix if present
+          CLEAN_VERSION="${VERSION#v}"
+          echo "Updating workspace version from 0.1.0 to $CLEAN_VERSION..."
+          
+          # 1. Update Root Workspace
+          sed "s/^version = \"0.1.0\"/version = \"$CLEAN_VERSION\"/" Cargo.toml > Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
+          
+          # 2. Explicitly update Android Package (Fixes APK versioning)
+          echo "Injecting version into Android manifest..."
+          sed "s/^version.workspace = true/version = \"$CLEAN_VERSION\"/" bin/mangatan_android/Cargo.toml > bin/mangatan_android/Cargo.toml.tmp && mv bin/mangatan_android/Cargo.toml.tmp bin/mangatan_android/Cargo.toml
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android Platform & NDK
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, armv7-linux-androideabi
+
+      - name: Install cargo-apk2
+        run: cargo install --git https://github.com/kolbyml/cargo-apk2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.12.0'
+          cache: 'yarn'
+          cache-dependency-path: 'Mangatan-WebUI/yarn.lock'
+
+      - name: Prepare Assets (WebUI & Jars)
+        run: |
+          make android_webui
+          make download_android_jar
+          make download_android_jre
+          make android_icon
+
+      - name: Configure Dummy Keystore
+        working-directory: bin/mangatan_android
+        run: |
+          keytool -genkey -v -keystore dummy.keystore -alias dummy -keyalg RSA -keysize 2048 -validity 10000 -storepass password -keypass password -dname "CN=Dummy,O=Dummy,C=US"
+          
+          cat >> Cargo.toml <<EOF
+          
+          [package.metadata.android.signing.release]
+          path = "dummy.keystore"
+          keystore_password = "password"
+          key_alias = "dummy"
+          key_password = "password"
+          EOF
+
+      - name: Build APKs
+        working-directory: bin/mangatan_android
+        run: |
+          NDK_ROOT=${ANDROID_NDK_HOME}
+          if [ -z "$NDK_ROOT" ]; then
+            NDK_ROOT=$(ls -d /usr/local/lib/android/sdk/ndk/* | sort -V | tail -n1)
+          fi
+          echo "Using NDK at: $NDK_ROOT"
+
+          TOOLCHAIN_BIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          export RANLIB="$TOOLCHAIN_BIN/llvm-ranlib"
+          export AR="$TOOLCHAIN_BIN/llvm-ar"
+          
+          # --- CONFIG FOR AARCH64 (64-bit) ---
+          export CC_aarch64_linux_android="$TOOLCHAIN_BIN/aarch64-linux-android30-clang"
+          export CXX_aarch64_linux_android="$TOOLCHAIN_BIN/aarch64-linux-android30-clang++"
+          export AR_aarch64_linux_android="$TOOLCHAIN_BIN/llvm-ar"
+          
+          # --- CONFIG FOR ARMV7 (32-bit) ---
+          export CC_armv7_linux_androideabi="$TOOLCHAIN_BIN/armv7a-linux-androideabi30-clang"
+          export CXX_armv7_linux_androideabi="$TOOLCHAIN_BIN/armv7a-linux-androideabi30-clang++"
+          export AR_armv7_linux_androideabi="$TOOLCHAIN_BIN/llvm-ar"
+
+          # Create staging directory
+          mkdir -p ../../signing_stage
+
+          # --- 1. BUILD BROWSER VERSION (Default) ---
+          echo "🏗️ Building Browser Version..."
+          cargo apk2 build --release
+          
+          # Find output (cargo-apk places it in target/release/apk usually)
+          APK_PATH=$(find ../../target -name "*.apk" | grep "release/apk" | head -n 1)
+          echo "✅ Browser APK: $APK_PATH"
+          cp "$APK_PATH" ../../signing_stage/mangatan-browser-unsigned.apk
+          rm "$APK_PATH" # Clean up for next build
+
+          # --- 2. BUILD NATIVE WEBVIEW VERSION ---
+          echo "🏗️ Building Native Webview Version..."
+          cargo apk2 build --release --features native_webview
+          
+          APK_PATH=$(find ../../target -name "*.apk" | grep "release/apk" | head -n 1)
+          echo "✅ Native Webview APK: $APK_PATH"
+          cp "$APK_PATH" ../../signing_stage/mangatan-native-webview-unsigned.apk
+
+      - name: Sign APKs
+        env:
+          SIGNING_KEY_BASE64: ${{ secrets.ANDROID_SIGNING_KEY }}
+          KEY_STORE_PASSWORD: ${{ secrets.ANDROID_KEY_STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ALIAS: mangatan
+        run: |
+          echo "🔐 Decoding Keystore..."
+          echo "$SIGNING_KEY_BASE64" | base64 -d --ignore-garbage > release.keystore
+
+          # Check keystore validity
+          keytool -list -keystore release.keystore -storepass "$KEY_STORE_PASSWORD" -alias "$ALIAS" || {
+             echo "❌ ERROR: Keystore is corrupt or password is wrong."
+             exit 1
+          }
+          
+          BUILD_TOOLS_PATH="$ANDROID_HOME/build-tools/34.0.0"
+          mkdir -p signed_apks
+          
+          # Loop through all unsigned APKs in staging
+          for APK in signing_stage/*.apk; do
+            # Extract name (e.g., mangatan-browser)
+            BASENAME=$(basename "$APK" -unsigned.apk)
+            echo "✍️ Signing $BASENAME..."
+            
+            "$BUILD_TOOLS_PATH/zipalign" -v -p 4 "$APK" "${BASENAME}-aligned.apk"
+            
+            "$BUILD_TOOLS_PATH/apksigner" sign \
+              --ks release.keystore \
+              --ks-pass pass:"$KEY_STORE_PASSWORD" \
+              --ks-key-alias "$ALIAS" \
+              --key-pass pass:"$KEY_PASSWORD" \
+              --out "signed_apks/${BASENAME}.apk" \
+              "${BASENAME}-aligned.apk"
+              
+            "$BUILD_TOOLS_PATH/apksigner" verify "signed_apks/${BASENAME}.apk"
+          done
+
+      - name: Upload Android Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mangatan-android
+          path: signed_apks/*.apk
+
+  # --- JOB 2: Create Tag & Release (Runs after build) ---
+  create_tag_and_release:
+    needs: [build_android]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.RELEASE_TOKEN }}
+          fetch-depth: 0
+
+      - name: Create and Push Tag
+        id: create_tag
+        run: |
+          VERSION="${{ inputs.version }}"
+          if [[ $VERSION != v* ]]; then VERSION="v$VERSION"; fi
+          
+          echo "Creating tag: $VERSION"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Check if tag already exists
+          if git rev-parse "$VERSION" >/dev/null 2>&1; then
+            echo "⚠️ Tag $VERSION already exists. Skipping tag creation."
+            echo "tag_exists=true" >> $GITHUB_OUTPUT
+          else
+            git tag -a "$VERSION" -m "Android Release $VERSION"
+            git push origin "$VERSION"
+            echo "✅ Tag $VERSION created and pushed."
+            echo "tag_exists=false" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Download Android Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: mangatan-android
+          path: release/android
+
+      - name: Prepare Release Assets
+        run: |
+          mkdir final_release
+          VERSION="${{ steps.create_tag.outputs.version }}"
+          
+          # ANDROID
+          mv release/android/mangatan-browser.apk final_release/Mangatan-${VERSION}-Android-Browser-Advanced-Users.apk
+          mv release/android/mangatan-native-webview.apk final_release/Mangatan-${VERSION}-Android-NativeWebview-Recommended.apk
+
+      - name: Generate Checksums
+        run: cd final_release && sha256sum * > Checksums.sha256
+
+      - name: Generate Release Notes
+        run: |
+          VERSION="${{ steps.create_tag.outputs.version }}"
+          PREV_TAG=$(git describe --tags --abbrev=0 "${VERSION}^" 2>/dev/null || true)
+          
+          echo "## Android Release $VERSION" > RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "### 📱 Android APKs" >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "- **Recommended**: Native WebView version (better compatibility)" >> RELEASE_NOTES.md
+          echo "- **Advanced Users**: Browser version (more features, may have issues)" >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "### 📝 Changes" >> RELEASE_NOTES.md
+          
+          if [ -z "$PREV_TAG" ]; then
+            git log --no-merges --pretty=format:"- %s (%h)" >> RELEASE_NOTES.md
+          else
+            git log "$PREV_TAG..$VERSION" --no-merges --pretty=format:"- %s (%h)" >> RELEASE_NOTES.md
+          fi
+
+      - name: Create or Update Release
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ steps.create_tag.outputs.version }}
+          name: Android Release ${{ steps.create_tag.outputs.version }}
+          draft: false
+          body_path: RELEASE_NOTES.md
+          files: final_release/*
