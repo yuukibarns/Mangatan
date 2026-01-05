@@ -15,6 +15,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.FileInputStream;
 
 public class SetupActivity extends Activity {
 
@@ -24,7 +25,19 @@ public class SetupActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        // --- Simple Programmatic UI (No XML needed) ---
+        // Check if config already exists
+        File configFile = new File(getFilesDir(), "data_path.cfg");
+        if (configFile.exists()) {
+            // Config exists - go straight to main activity
+            launchMainActivity();
+            return;
+        }
+
+        // Config doesn't exist - show setup UI
+        showSetupUI();
+    }
+
+    private void showSetupUI() {
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
         layout.setPadding(50, 50, 50, 50);
@@ -43,7 +56,6 @@ public class SetupActivity extends Activity {
         pathInput.setText(Environment.getExternalStorageDirectory().getAbsolutePath() + "/MangatanData");
         layout.addView(pathInput);
 
-        // Add spacer
         TextView spacer = new TextView(this);
         spacer.setHeight(40);
         layout.addView(spacer);
@@ -82,7 +94,6 @@ public class SetupActivity extends Activity {
                 Toast.makeText(this, "Permission already granted!", Toast.LENGTH_SHORT).show();
             }
         } else {
-            // Android 10 and below
             requestPermissions(new String[]{
                 android.Manifest.permission.WRITE_EXTERNAL_STORAGE,
                 android.Manifest.permission.READ_EXTERNAL_STORAGE
@@ -91,7 +102,7 @@ public class SetupActivity extends Activity {
     }
 
     private void saveAndFinish() {
-        // 1. Check Permissions
+        // Check Permissions
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             if (!Environment.isExternalStorageManager()) {
                 Toast.makeText(this, "Please grant storage permissions first", Toast.LENGTH_LONG).show();
@@ -102,7 +113,7 @@ public class SetupActivity extends Activity {
         String pathStr = pathInput.getText().toString().trim();
         File targetDir = new File(pathStr);
 
-        // 2. Try to create the directory
+        // Try to create the directory
         if (!targetDir.exists()) {
             boolean created = targetDir.mkdirs();
             if (!created && !targetDir.exists()) {
@@ -111,7 +122,7 @@ public class SetupActivity extends Activity {
             }
         }
 
-        // 3. Write path to Internal Storage config file
+        // Write path to config file
         try {
             File configFile = new File(getFilesDir(), "data_path.cfg");
             FileOutputStream fos = new FileOutputStream(configFile);
@@ -120,10 +131,19 @@ public class SetupActivity extends Activity {
             
             Toast.makeText(this, "Setup Complete!", Toast.LENGTH_SHORT).show();
             
-            // Close this activity, returning to the Native Activity
-            finish(); 
+            // Launch main activity
+            launchMainActivity();
+            
         } catch (Exception e) {
             Toast.makeText(this, "Error saving config: " + e.getMessage(), Toast.LENGTH_LONG).show();
         }
+    }
+
+    private void launchMainActivity() {
+        Intent intent = new Intent();
+        intent.setClassName(this, "com.mangatan.app.MangatanActivity");
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+        startActivity(intent);
+        finish();
     }
 }
