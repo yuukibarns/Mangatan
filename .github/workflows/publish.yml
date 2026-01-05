@@ -496,7 +496,7 @@ jobs:
              exit 1
           }
           
-          BUILD_TOOLS_PATH="$ANDROID_HOME/build-tools/30.0.3"
+          BUILD_TOOLS_PATH="$ANDROID_HOME/build-tools/34.0.0"
           mkdir -p signed_apks
           
           # Loop through all unsigned APKs in staging
