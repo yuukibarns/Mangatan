@@ -23,8 +23,9 @@ java_sources = "java"
 resources = "res"
 
 [package.metadata.android.sdk]
-min_sdk_version = 23
-target_sdk_version = 26
+target_sdk_version = 34
+compile_sdk_version = 34
+min_sdk_version = 26
 
 [[package.metadata.android.uses_permission]]
 name = "android.permission.INTERNET"
