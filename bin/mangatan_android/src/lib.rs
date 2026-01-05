@@ -23,6 +23,7 @@ use lazy_static::lazy_static;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::AtomicI64;
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::{
     collections::VecDeque,
     ffi::{CString, c_void},
@@ -55,6 +56,27 @@ use winit::platform::android::{EventLoopBuilderExtAndroid, activity::AndroidApp}
 lazy_static! {
     static ref LOG_BUFFER: Mutex<VecDeque<String>> = Mutex::new(VecDeque::with_capacity(500));
 }
+
+// --- CONFIGURATION HELPERS ---
+fn get_config_path(files_dir: &Path) -> PathBuf {
+    files_dir.join("data_location.cfg")
+}
+
+fn load_saved_path(files_dir: &Path) -> Option<PathBuf> {
+    let cfg = get_config_path(files_dir);
+    if cfg.exists() {
+        fs::read_to_string(cfg)
+            .ok()
+            .map(|s| PathBuf::from(s.trim()))
+    } else {
+        None
+    }
+}
+
+fn save_path_config(files_dir: &Path, path_str: &str) -> std::io::Result<()> {
+    fs::write(get_config_path(files_dir), path_str)
+}
+// -----------------------------
 
 struct GuiWriter;
 impl io::Write for GuiWriter {
@@ -196,12 +218,19 @@ struct MangatanApp {
     webview_launcher: Box<dyn Fn() + Send + Sync>,
     #[cfg(feature = "native_webview")]
     webview_launched: bool,
+    setup_needed: bool,
+    input_path: String,
+    path_sender: Option<Sender<PathBuf>>,
+    config_dir: PathBuf,
 }
 
 impl MangatanApp {
     fn new(
         _cc: &eframe::CreationContext<'_>,
         server_ready: Arc<AtomicBool>,
+        config_dir: PathBuf,
+        setup_needed: bool,
+        path_sender: Sender<PathBuf>,
         #[cfg(feature = "native_webview")] webview_launcher: Box<dyn Fn() + Send + Sync>,
     ) -> Self {
         Self {
@@ -210,12 +239,70 @@ impl MangatanApp {
             webview_launcher,
             #[cfg(feature = "native_webview")]
             webview_launched: false,
+            setup_needed,
+            input_path: "/storage/emulated/0/MangatanData".to_string(),
+            path_sender: Some(path_sender),
+            config_dir,
         }
     }
 }
 
 impl eframe::App for MangatanApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // --- SETUP PHASE: User selects path ---
+        if self.setup_needed {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(50.0);
+                    ui.heading(
+                        egui::RichText::new("Mangatan Setup")
+                            .size(30.0)
+                            .strong(),
+                    );
+                    ui.add_space(20.0);
+                    
+                    ui.label("Welcome! Please select a location to store your mangas, database, and bookmarks.");
+                    ui.colored_label(egui::Color32::YELLOW, "We recommend keeping this outside the app folder so your data persists even if you reinstall.");
+                    
+                    ui.add_space(20.0);
+                    ui.label("Data Storage Path:");
+                    ui.text_edit_singleline(&mut self.input_path);
+                    
+                    ui.add_space(30.0);
+                    
+                    if ui.add(egui::Button::new("Start Server").min_size(egui::vec2(200.0, 50.0))).clicked() {
+                        let path = PathBuf::from(&self.input_path);
+                        
+                        // 1. Try create directory
+                        if let Err(e) = fs::create_dir_all(&path) {
+                            error!("Failed to create directory at {:?}: {}", path, e);
+                            return; // Don't proceed if we can't write here
+                        }
+
+                        // 2. Save Config
+                        if let Err(e) = save_path_config(&self.config_dir, &self.input_path) {
+                            error!("Failed to save config: {}", e);
+                            // Proceed anyway, user will just have to type it again next time
+                        }
+                        
+                        // 3. Send Signal to Background Thread
+                        if let Some(tx) = self.path_sender.take() {
+                            info!("GUI sending path to background: {:?}", path);
+                            let _ = tx.send(path);
+                        }
+                        
+                        // 4. Switch to Running Mode
+                        self.setup_needed = false;
+                    }
+
+                    ui.add_space(20.0);
+                    ui.small("Make sure you granted 'All Files Access' permissions if you chose external storage.");
+                });
+            });
+            return; // STOP HERE, don't draw the regular UI yet
+        }
+
+        // --- RUNNING PHASE: Standard UI ---
         let is_ready = self.server_ready.load(Ordering::Relaxed);
         if !is_ready {
             ctx.request_repaint_after(Duration::from_millis(100));
@@ -341,14 +428,36 @@ fn android_main(app: AndroidApp) {
 
     let app_bg = app.clone();
     let files_dir = app.internal_data_path().expect("Failed to get data path");
-    let files_dir_clone = files_dir.clone();
+    let files_dir_clone = files_dir.clone(); // For Config
+    let files_dir_clone_web = files_dir.clone(); // For Web Server
 
     let server_ready = Arc::new(AtomicBool::new(false));
     let server_ready_bg = server_ready.clone();
     let server_ready_gui = server_ready.clone();
 
+    // 1. Setup Channel for Path Communication
+    let (tx, rx) = std::sync::mpsc::channel();
+    
+    // 2. Check for Config
+    let saved_path = load_saved_path(&files_dir);
+    let setup_needed = saved_path.is_none();
+    
+    if let Some(p) = saved_path {
+        info!("Found existing configuration: {:?}", p);
+        // Pre-fill channel so background thread starts immediately
+        let _ = tx.send(p);
+    }
+
+    // 3. Spawn Background Services (Blocks on rx.recv())
     thread::spawn(move || {
-        start_background_services(app_bg, files_dir);
+        info!("Background Thread: Waiting for Data Path...");
+        match rx.recv() {
+            Ok(data_path) => {
+                info!("Background Thread: Received path {:?}. Starting JVM...", data_path);
+                start_background_services(app_bg, files_dir, data_path); 
+            },
+            Err(_) => error!("Channel closed unexpectedly!"),
+        }
     });
 
     thread::spawn(move || {
@@ -383,7 +492,7 @@ fn android_main(app: AndroidApp) {
         });
 
         rt.block_on(async move {
-            if let Err(e) = start_web_server(files_dir_clone).await {
+            if let Err(e) = start_web_server(files_dir_clone_web).await {
                 error!("Web Server Crashed: {:?}", e);
             }
         });
@@ -428,6 +537,9 @@ fn android_main(app: AndroidApp) {
             Ok(Box::new(MangatanApp::new(
                 cc,
                 server_ready_gui,
+                files_dir_clone, // Pass internal dir for config saving
+                setup_needed,
+                tx,              // Pass sender
                 #[cfg(feature = "native_webview")]
                 launcher,
             )))
@@ -769,7 +881,7 @@ fn tungstenite_to_axum(msg: TungsteniteMessage) -> Message {
     }
 }
 
-fn start_background_services(app: AndroidApp, files_dir: PathBuf) {
+fn start_background_services(app: AndroidApp, files_dir: PathBuf, data_root: PathBuf) {
     let apk_time = get_apk_update_time(&app).unwrap_or(i64::MAX);
     let marker = files_dir.join(".extracted_apk_time");
 
@@ -816,11 +928,15 @@ fn start_background_services(app: AndroidApp, files_dir: PathBuf) {
     fs::create_dir_all(&bin_dir).expect("Failed to create bin directory");
     let jar_path = bin_dir.join("Suwayomi-Server.jar");
 
-    let tachidesk_data = files_dir.join("tachidesk_data");
-    let tmp_dir = files_dir.join("tmp");
+    // Use passed data_root for suwayomi data
+    let tachidesk_data = data_root; // Use the path selected by user
+    let tmp_dir = files_dir.join("tmp"); // Keep temp internal
 
+    // Create Tachidesk data dir at the new location
     if !tachidesk_data.exists() {
-        let _ = fs::create_dir_all(&tachidesk_data);
+        if let Err(e) = fs::create_dir_all(&tachidesk_data) {
+            error!("Failed to create storage root {:?}: {}", tachidesk_data, e);
+        }
     }
 
     let tachi_webui_dir = tachidesk_data.join("webUI");
