@@ -325,30 +325,64 @@ fn android_main(app: AndroidApp) {
 
     check_and_request_permissions(&app);
 
-    // --- CONDITIONALLY REQUEST PERMISSIONS ---
+    // Acquire basic system locks
+    acquire_wake_lock(&app);
+
+    let files_dir = app.internal_data_path().expect("Failed to get data path");
+    let config_path = files_dir.join("data_path.cfg");
+
+    // --- BLOCKING SETUP LOGIC ---
+    if !config_path.exists() {
+        info!("Config not found. Launching Java SetupActivity...");
+
+        // 1. Launch the Java UI
+        launch_setup_activity(&app);
+
+        // 2. Wait indefinitely until the file is created by Java
+        loop {
+            if config_path.exists() {
+                info!("Config file detected!");
+                break;
+            }
+            // Sleep to prevent burning CPU
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+
+    // --- READ CONFIG ---
+    let data_path_str = fs::read_to_string(&config_path)
+        .expect("Failed to read config file")
+        .trim()
+        .to_string();
+
+    let data_root = PathBuf::from(data_path_str);
+    info!("Using Data Root: {:?}", data_root);
+
+    // --- RESUME NORMAL STARTUP ---
     #[cfg(not(feature = "native_webview"))]
     {
         // Only ask for battery/notifications if we are in DEBUG/Server mode
         ensure_battery_unrestricted(&app);
     }
 
-    // We still need locks to keep the server running
+    // We still need wifi lock to keep the server running
     acquire_wifi_lock(&app);
-    acquire_wake_lock(&app);
 
     // Service ensures the process isn't killed immediately
     start_foreground_service(&app);
 
     let app_bg = app.clone();
-    let files_dir = app.internal_data_path().expect("Failed to get data path");
     let files_dir_clone = files_dir.clone();
+    let data_root_clone = data_root.clone();
+    let files_dir_web = files_dir.clone();  // For webui assets
+    let data_web = data_root.clone();  // For OCR/Yomitan
 
     let server_ready = Arc::new(AtomicBool::new(false));
     let server_ready_bg = server_ready.clone();
     let server_ready_gui = server_ready.clone();
 
     thread::spawn(move || {
-        start_background_services(app_bg, files_dir);
+        start_background_services(app_bg, files_dir_clone, data_root_clone);
     });
 
     thread::spawn(move || {
@@ -383,7 +417,7 @@ fn android_main(app: AndroidApp) {
         });
 
         rt.block_on(async move {
-            if let Err(e) = start_web_server(files_dir_clone).await {
+            if let Err(e) = start_web_server(files_dir_web, data_web).await {
                 error!("Web Server Crashed: {:?}", e);
             }
         });
@@ -438,6 +472,54 @@ fn android_main(app: AndroidApp) {
     });
 }
 
+fn launch_setup_activity(app: &AndroidApp) {
+    use jni::objects::{JObject, JValue};
+
+    info!("🚀 Launching Setup Activity...");
+
+    let vm_ptr = app.vm_as_ptr() as *mut jni::sys::JavaVM;
+    let vm = unsafe { JavaVM::from_raw(vm_ptr).unwrap() };
+    let mut env = vm.attach_current_thread().unwrap();
+
+    let activity_ptr = app.activity_as_ptr() as jni::sys::jobject;
+    let context = unsafe { JObject::from_raw(activity_ptr) };
+
+    let intent_class = env
+        .find_class("android/content/Intent")
+        .expect("Failed to find Intent class");
+    let intent = env
+        .new_object(&intent_class, "()V", &[])
+        .expect("Failed to create Intent");
+
+    let pkg_name = get_package_name(&mut env, &context).unwrap_or("com.mangatan.app".to_string());
+    let pkg_name_jstr = env.new_string(&pkg_name).unwrap();
+
+    let activity_class_name = env.new_string("com.mangatan.app.SetupActivity").unwrap();
+
+    let _ = env
+        .call_method(
+            &intent,
+            "setClassName",
+            "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;",
+            &[
+                JValue::Object(&pkg_name_jstr),
+                JValue::Object(&activity_class_name),
+            ],
+        )
+        .expect("Failed to set class name");
+
+    let _ = env
+        .call_method(
+            &context,
+            "startActivity",
+            "(Landroid/content/Intent;)V",
+            &[JValue::Object(&intent)],
+        )
+        .expect("Failed to start Setup Activity");
+
+    info!("✅ Setup Activity launched");
+}
+
 fn launch_webview_activity(app: &AndroidApp) {
     use jni::objects::{JObject, JValue};
 
@@ -487,9 +569,14 @@ fn launch_webview_activity(app: &AndroidApp) {
         .expect("Failed to start Webview Activity");
 }
 
-async fn start_web_server(data_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+async fn start_web_server(
+    internal_dir: PathBuf,  // For webui assets
+    user_data_dir: PathBuf, // For OCR/Yomitan/user data
+) -> Result<(), Box<dyn std::error::Error>> {
     info!("🚀 Initializing Axum Proxy Server on port 4568...");
-    let ocr_router = mangatan_ocr_server::create_router(data_dir.clone());
+
+    // OCR and Yomitan use the USER data path
+    let ocr_router = mangatan_ocr_server::create_router(user_data_dir.clone());
     let anki_router = mangatan_anki_server::create_router();
 
     #[cfg(feature = "native_webview")]
@@ -503,9 +590,10 @@ async fn start_web_server(data_dir: PathBuf) -> Result<(), Box<dyn std::error::E
         auto_install_yomitan
     );
     let yomitan_router =
-        mangatan_yomitan_server::create_router(data_dir.clone(), auto_install_yomitan);
+        mangatan_yomitan_server::create_router(user_data_dir.clone(), auto_install_yomitan);
 
-    let webui_dir = data_dir.join("webui");
+    // WebUI assets use INTERNAL storage
+    let webui_dir = internal_dir.join("webui");
     let client = Client::new();
 
     let state = AppState { client, webui_dir };
@@ -769,7 +857,7 @@ fn tungstenite_to_axum(msg: TungsteniteMessage) -> Message {
     }
 }
 
-fn start_background_services(app: AndroidApp, files_dir: PathBuf) {
+fn start_background_services(app: AndroidApp, files_dir: PathBuf, data_root: PathBuf) {
     let apk_time = get_apk_update_time(&app).unwrap_or(i64::MAX);
     let marker = files_dir.join(".extracted_apk_time");
 
@@ -816,7 +904,8 @@ fn start_background_services(app: AndroidApp, files_dir: PathBuf) {
     fs::create_dir_all(&bin_dir).expect("Failed to create bin directory");
     let jar_path = bin_dir.join("Suwayomi-Server.jar");
 
-    let tachidesk_data = files_dir.join("tachidesk_data");
+    // Use the user-chosen data_root for Tachidesk data
+    let tachidesk_data = data_root;
     let tmp_dir = files_dir.join("tmp");
 
     if !tachidesk_data.exists() {

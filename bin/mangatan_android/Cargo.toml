@@ -77,6 +77,13 @@ exported = false
 theme = "@android:style/Theme.NoTitleBar"
 
 [[package.metadata.android.application.activity]]
+name = ".SetupActivity"
+label = "Mangatan Setup"
+config_changes = "orientation|keyboardHidden|screenSize" 
+exported = false
+theme = "@android:style/Theme.NoTitleBar"
+
+[[package.metadata.android.application.activity]]
 name = ".MangatanActivity"
 label = "Mangatan"
 config_changes = "orientation|keyboardHidden|screenSize"
