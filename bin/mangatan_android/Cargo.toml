@@ -77,14 +77,24 @@ exported = false
 theme = "@android:style/Theme.NoTitleBar"
 
 [[package.metadata.android.application.activity]]
-name = ".MangatanActivity"
+name = ".SetupActivity"
 label = "Mangatan"
 config_changes = "orientation|keyboardHidden|screenSize"
 exported = true
+theme = "@android:style/Theme.Material"
 
 [[package.metadata.android.application.activity.intent_filter]]
-actions = ["android.intent.action.VIEW", "android.intent.action.MAIN"]
+actions = ["android.intent.action.MAIN"]
 categories = ["android.intent.category.LAUNCHER"]
+
+[[package.metadata.android.application.activity]]
+name = ".MangatanActivity"
+label = "Mangatan Main Activity"
+config_changes = "orientation|keyboardHidden|screenSize"
+exported = false
+
+[[package.metadata.android.application.activity.intent_filter]]
+actions = ["android.intent.action.VIEW"]
 
 [[package.metadata.android.application.activity.meta_data]]
 name = "android.app.lib_name"

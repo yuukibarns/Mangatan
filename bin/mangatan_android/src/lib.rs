@@ -316,12 +316,76 @@ impl eframe::App for MangatanApp {
     }
 }
 
+// Get the external data path from SharedPreferences and convert to PathBuf
+fn get_external_data_path(app: &AndroidApp) -> Option<PathBuf> {
+    let vm_ptr = app.vm_as_ptr() as *mut jni::sys::JavaVM;
+    let vm = unsafe { JavaVM::from_raw(vm_ptr).ok()? };
+    let mut env = vm.attach_current_thread().ok()?;
+
+    let activity_ptr = app.activity_as_ptr() as jni::sys::jobject;
+    let context = unsafe { JObject::from_raw(activity_ptr) };
+
+    // Get SharedPreferences
+    let prefs_name = env.new_string("mangatan_prefs").ok()?;
+    let mode = 0i32; // MODE_PRIVATE
+
+    let prefs = env
+        .call_method(
+            &context,
+            "getSharedPreferences",
+            "(Ljava/lang/String;I)Landroid/content/SharedPreferences;",
+            &[JValue::Object(&prefs_name), JValue::Int(mode)],
+        )
+        .ok()?
+        .l()
+        .ok()?;
+
+    // Get the external_data_path string
+    let key = env.new_string("external_data_path").ok()?;
+    let default_val = env.new_string("").ok()?;
+
+    let path_jstring = env
+        .call_method(
+            &prefs,
+            "getString",
+            "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+            &[JValue::Object(&key), JValue::Object(&default_val)],
+        )
+        .ok()?
+        .l()
+        .ok()?;
+
+    if path_jstring.is_null() {
+        return None;
+    }
+
+    let path_string: String = env.get_string(&JString::from(path_jstring)).ok()?.into();
+
+    if path_string.is_empty() {
+        None
+    } else {
+        // It's already a real filesystem path from Java!
+        Some(PathBuf::from(path_string))
+    }
+}
+
 #[unsafe(no_mangle)]
 fn android_main(app: AndroidApp) {
     init_tracing();
     redirect_stdout_to_gui();
 
     info!("Starting Mangatan...");
+
+    let external_data_path = match get_external_data_path(&app) {
+        Some(path) => {
+            info!("External data directory: {}", path.display());
+            path
+        }
+        None => {
+            error!("No external data path found - setup not completed!");
+            return;
+        }
+    };
 
     check_and_request_permissions(&app);
 
@@ -340,15 +404,20 @@ fn android_main(app: AndroidApp) {
     start_foreground_service(&app);
 
     let app_bg = app.clone();
-    let files_dir = app.internal_data_path().expect("Failed to get data path");
-    let files_dir_clone = files_dir.clone();
+
+    // Internal storage for webui only
+    let internal_data_path = app
+        .internal_data_path()
+        .expect("Failed to get internal data path");
+    let external_data_path_clone = external_data_path.clone();
+    let internal_data_path_clone = internal_data_path.clone();
 
     let server_ready = Arc::new(AtomicBool::new(false));
     let server_ready_bg = server_ready.clone();
     let server_ready_gui = server_ready.clone();
 
     thread::spawn(move || {
-        start_background_services(app_bg, files_dir);
+        start_background_services(app_bg, internal_data_path, external_data_path);
     });
 
     thread::spawn(move || {
@@ -383,7 +452,9 @@ fn android_main(app: AndroidApp) {
         });
 
         rt.block_on(async move {
-            if let Err(e) = start_web_server(files_dir_clone).await {
+            if let Err(e) =
+                start_web_server(internal_data_path_clone, external_data_path_clone).await
+            {
                 error!("Web Server Crashed: {:?}", e);
             }
         });
@@ -487,9 +558,12 @@ fn launch_webview_activity(app: &AndroidApp) {
         .expect("Failed to start Webview Activity");
 }
 
-async fn start_web_server(data_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+async fn start_web_server(
+    internal_data_path: PathBuf,
+    external_data_path: PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
     info!("🚀 Initializing Axum Proxy Server on port 4568...");
-    let ocr_router = mangatan_ocr_server::create_router(data_dir.clone());
+    let ocr_router = mangatan_ocr_server::create_router(external_data_path.clone().join("ocr_data"));
     let anki_router = mangatan_anki_server::create_router();
 
     #[cfg(feature = "native_webview")]
@@ -503,9 +577,9 @@ async fn start_web_server(data_dir: PathBuf) -> Result<(), Box<dyn std::error::E
         auto_install_yomitan
     );
     let yomitan_router =
-        mangatan_yomitan_server::create_router(data_dir.clone(), auto_install_yomitan);
+        mangatan_yomitan_server::create_router(external_data_path.clone().join("yomitan_data"), auto_install_yomitan);
 
-    let webui_dir = data_dir.join("webui");
+    let webui_dir = internal_data_path.join("webui");
     let client = Client::new();
 
     let state = AppState { client, webui_dir };
@@ -769,17 +843,21 @@ fn tungstenite_to_axum(msg: TungsteniteMessage) -> Message {
     }
 }
 
-fn start_background_services(app: AndroidApp, files_dir: PathBuf) {
+fn start_background_services(
+    app: AndroidApp,
+    internal_data_path: PathBuf,
+    external_data_path: PathBuf,
+) {
     let apk_time = get_apk_update_time(&app).unwrap_or(i64::MAX);
-    let marker = files_dir.join(".extracted_apk_time");
+    let marker = internal_data_path.join(".extracted_apk_time");
 
     let last_time: i64 = fs::read_to_string(&marker)
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
-    let jre_root = files_dir.join("jre");
-    let webui = files_dir.join("webui");
+    let jre_root = internal_data_path.join("jre");
+    let webui = internal_data_path.join("webui");
 
     if apk_time > last_time {
         info!("Extracting assets (APK updated)...");
@@ -791,7 +869,7 @@ fn start_background_services(app: AndroidApp, files_dir: PathBuf) {
             fs::remove_dir_all(&webui).ok();
         }
 
-        if let Err(e) = install_jre(&app, &files_dir) {
+        if let Err(e) = install_jre(&app, &internal_data_path) {
             error!("JRE extraction failed: {:?}", e);
             return;
         }
@@ -809,15 +887,15 @@ fn start_background_services(app: AndroidApp, files_dir: PathBuf) {
     }
 
     // Create 'bin' directory to satisfy Suwayomi's directory scanner
-    let bin_dir = files_dir.join("bin");
+    let bin_dir = internal_data_path.join("bin");
     if bin_dir.exists() {
         fs::remove_dir_all(&bin_dir).ok();
     }
     fs::create_dir_all(&bin_dir).expect("Failed to create bin directory");
     let jar_path = bin_dir.join("Suwayomi-Server.jar");
 
-    let tachidesk_data = files_dir.join("tachidesk_data");
-    let tmp_dir = files_dir.join("tmp");
+    let tachidesk_data = external_data_path.join("tachidesk_data");
+    let tmp_dir = internal_data_path.join("tmp");
 
     if !tachidesk_data.exists() {
         let _ = fs::create_dir_all(&tachidesk_data);
