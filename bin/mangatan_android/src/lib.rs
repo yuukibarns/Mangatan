@@ -339,16 +339,37 @@ fn android_main(app: AndroidApp) {
     // Service ensures the process isn't killed immediately
     start_foreground_service(&app);
 
+    let internal_path = app.internal_data_path()
+        .expect("Failed to get internal data path")
+        .to_path_buf();
+    let internal_path_for_bg = internal_path.clone();
+    let internal_path_for_server = internal_path.clone();
+
+    let external_path: PathBuf;
+    
+    loop {
+        if let Some(path) = get_custom_data_path(&app) {
+            info!("Found custom data path: {:?}", path);
+            external_path = path;
+            break;
+        } else {
+            info!("No data path configured. Launching Setup...");
+            launch_setup_activity(&app);
+            std::thread::sleep(Duration::from_secs(2)); 
+        }
+    }
+
+    let external_path_for_bg = external_path.clone();
+    let external_path_for_server = external_path.clone();
+
     let app_bg = app.clone();
-    let files_dir = app.internal_data_path().expect("Failed to get data path");
-    let files_dir_clone = files_dir.clone();
 
     let server_ready = Arc::new(AtomicBool::new(false));
     let server_ready_bg = server_ready.clone();
     let server_ready_gui = server_ready.clone();
 
     thread::spawn(move || {
-        start_background_services(app_bg, files_dir);
+        start_background_services(app_bg, internal_path_for_bg, external_path_for_bg);
     });
 
     thread::spawn(move || {
@@ -383,7 +404,7 @@ fn android_main(app: AndroidApp) {
         });
 
         rt.block_on(async move {
-            if let Err(e) = start_web_server(files_dir_clone).await {
+            if let Err(e) = start_web_server(internal_path_for_server, external_path_for_server).await {
                 error!("Web Server Crashed: {:?}", e);
             }
         });
@@ -438,6 +459,76 @@ fn android_main(app: AndroidApp) {
     });
 }
 
+fn get_custom_data_path(app: &AndroidApp) -> Option<PathBuf> {
+    let vm_ptr = app.vm_as_ptr() as *mut jni::sys::JavaVM;
+    let vm = unsafe { JavaVM::from_raw(vm_ptr).unwrap() };
+    let mut env = vm.attach_current_thread().unwrap();
+    
+    let context_ptr = app.activity_as_ptr() as jni::sys::jobject;
+    let context = unsafe { JObject::from_raw(context_ptr) };
+
+    // Get SharedPreferences
+    let prefs_name = env.new_string("MangatanPrefs").ok()?;
+    let mode_private = 0;
+    
+    let start_class = env.find_class("android/content/Context").ok()?;
+    let prefs = env.call_method(
+        &context,
+        "getSharedPreferences",
+        "(Ljava/lang/String;I)Landroid/content/SharedPreferences;",
+        &[JValue::Object(&prefs_name), JValue::Int(mode_private)]
+    ).ok()?.l().ok()?;
+
+    // Get String "custom_storage_path"
+    let key = env.new_string("custom_storage_path").ok()?;
+    let default_val = env.new_string("").ok()?;
+    
+    let path_jstr = env.call_method(
+        &prefs, 
+        "getString", 
+        "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", 
+        &[JValue::Object(&key), JValue::Object(&default_val)]
+    ).ok()?.l().ok()?;
+
+    let path_str: String = env.get_string(&path_jstr.into()).ok()?.into();
+
+    if path_str.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path_str))
+    }
+}
+
+fn launch_setup_activity(app: &AndroidApp) {
+    info!("Starting Setup Activity...");
+    let vm_ptr = app.vm_as_ptr() as *mut jni::sys::JavaVM;
+    let vm = unsafe { JavaVM::from_raw(vm_ptr).unwrap() };
+    let mut env = vm.attach_current_thread().unwrap();
+    let activity_ptr = app.activity_as_ptr() as jni::sys::jobject;
+    let context = unsafe { JObject::from_raw(activity_ptr) };
+
+    let intent_class = env.find_class("android/content/Intent").unwrap();
+    let intent = env.new_object(&intent_class, "()V", &[]).unwrap();
+
+    let pkg_name = "com.mangatan.app"; // Or fetch dynamically
+    let pkg_name_jstr = env.new_string(pkg_name).unwrap();
+    let cls_name_jstr = env.new_string("com.mangatan.app.SetupActivity").unwrap();
+
+    env.call_method(
+        &intent,
+        "setClassName",
+        "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;",
+        &[JValue::Object(&pkg_name_jstr), JValue::Object(&cls_name_jstr)],
+    ).unwrap();
+
+    env.call_method(
+        &context,
+        "startActivity",
+        "(Landroid/content/Intent;)V",
+        &[JValue::Object(&intent)],
+    ).unwrap();
+}
+
 fn launch_webview_activity(app: &AndroidApp) {
     use jni::objects::{JObject, JValue};
 
@@ -487,9 +578,12 @@ fn launch_webview_activity(app: &AndroidApp) {
         .expect("Failed to start Webview Activity");
 }
 
-async fn start_web_server(data_dir: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+async fn start_web_server(
+    data_dir: PathBuf, 
+    external_dir: PathBuf
+) -> Result<(), Box<dyn std::error::Error>> {
     info!("🚀 Initializing Axum Proxy Server on port 4568...");
-    let ocr_router = mangatan_ocr_server::create_router(data_dir.clone());
+    let ocr_router = mangatan_ocr_server::create_router(external_dir.clone());
     let anki_router = mangatan_anki_server::create_router();
 
     #[cfg(feature = "native_webview")]
@@ -503,7 +597,7 @@ async fn start_web_server(data_dir: PathBuf) -> Result<(), Box<dyn std::error::E
         auto_install_yomitan
     );
     let yomitan_router =
-        mangatan_yomitan_server::create_router(data_dir.clone(), auto_install_yomitan);
+        mangatan_yomitan_server::create_router(external_dir.clone(), auto_install_yomitan);
 
     let webui_dir = data_dir.join("webui");
     let client = Client::new();
@@ -769,7 +863,7 @@ fn tungstenite_to_axum(msg: TungsteniteMessage) -> Message {
     }
 }
 
-fn start_background_services(app: AndroidApp, files_dir: PathBuf) {
+fn start_background_services(app: AndroidApp, files_dir: PathBuf, external_dir: PathBuf) {
     let apk_time = get_apk_update_time(&app).unwrap_or(i64::MAX);
     let marker = files_dir.join(".extracted_apk_time");
 
@@ -816,7 +910,7 @@ fn start_background_services(app: AndroidApp, files_dir: PathBuf) {
     fs::create_dir_all(&bin_dir).expect("Failed to create bin directory");
     let jar_path = bin_dir.join("Suwayomi-Server.jar");
 
-    let tachidesk_data = files_dir.join("tachidesk_data");
+    let tachidesk_data = external_dir.join("tachidesk_data");
     let tmp_dir = files_dir.join("tmp");
 
     if !tachidesk_data.exists() {
