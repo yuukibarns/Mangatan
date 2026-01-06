@@ -563,7 +563,7 @@ async fn start_web_server(
     external_data_path: PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("🚀 Initializing Axum Proxy Server on port 4568...");
-    let ocr_router = mangatan_ocr_server::create_router(external_data_path.clone().join("ocr_data"));
+    let ocr_router = mangatan_ocr_server::create_router(internal_data_path.clone().join("ocr_data"));
     let anki_router = mangatan_anki_server::create_router();
 
     #[cfg(feature = "native_webview")]
