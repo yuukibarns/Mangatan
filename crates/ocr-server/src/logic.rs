@@ -36,6 +36,19 @@ mutation GET_CHAPTER_PAGES_FETCH($input: FetchChapterPagesInput!) {
 }
 "#;
 
+const PROXY_SETTINGS_QUERY: &str = r#"
+query GetProxySettings {
+  settings {
+    socksProxyEnabled
+    socksProxyVersion
+    socksProxyHost
+    socksProxyPort
+    socksProxyUsername
+    socksProxyPassword
+  }
+}
+"#;
+
 // --- GraphQL Structs ---
 
 #[derive(Deserialize)]
@@ -87,6 +100,37 @@ struct FetchedChapterNode {
     page_count: Option<usize>,
 }
 
+#[derive(Deserialize)]
+struct ProxySettingsResponse {
+    data: Option<ProxySettingsData>,
+}
+
+#[derive(Deserialize)]
+struct ProxySettingsData {
+    settings: Option<ProxySettings>,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct ProxySettings {
+    #[serde(rename = "socksProxyEnabled")]
+    socks_proxy_enabled: bool,
+    
+    #[serde(rename = "socksProxyVersion")]
+    socks_proxy_version: i32,
+    
+    #[serde(rename = "socksProxyHost")]
+    socks_proxy_host: String,
+    
+    #[serde(rename = "socksProxyPort")]
+    socks_proxy_port: String,
+    
+    #[serde(rename = "socksProxyUsername")]
+    socks_proxy_username: Option<String>,
+    
+    #[serde(rename = "socksProxyPassword")]
+    socks_proxy_password: Option<String>,
+}
+
 async fn execute_graphql_request(
     query_body: serde_json::Value,
     user: Option<String>,
@@ -119,6 +163,29 @@ async fn execute_graphql_request(
     }
 
     Ok(response)
+}
+
+async fn get_proxy_settings(
+    user: Option<String>,
+    pass: Option<String>,
+) -> anyhow::Result<Option<ProxySettings>> {
+    let query_body = serde_json::json!({
+        "operationName": "GetProxySettings",
+        "query": PROXY_SETTINGS_QUERY,
+    });
+
+    let response = execute_graphql_request(query_body, user, pass).await?;
+
+    let json_response: ProxySettingsResponse = response
+        .json()
+        .await
+        .map_err(|err| anyhow!("Error decoding proxy settings GraphQL response: {err}"))?;
+
+    let proxy_settings = json_response
+        .data
+        .and_then(|data| data.settings);
+
+    Ok(proxy_settings)
 }
 
 pub async fn resolve_total_pages_from_graphql(
@@ -347,7 +414,11 @@ pub struct RawChunk {
 }
 
 // --- Public Helper for Testing ---
-pub async fn get_raw_ocr_data(image_bytes: &[u8]) -> anyhow::Result<Vec<RawChunk>> {
+pub async fn get_raw_ocr_data(
+    image_bytes: &[u8],
+    user: Option<String>,
+    pass: Option<String>,
+) -> anyhow::Result<Vec<RawChunk>> {
     let reader = ImageReader::new(Cursor::new(image_bytes))
         .with_guessed_format()
         .map_err(|err| anyhow!("Failed with_guessed_format: {err:?}"))?;
@@ -365,7 +436,57 @@ pub async fn get_raw_ocr_data(image_bytes: &[u8]) -> anyhow::Result<Vec<RawChunk
     let chunk_height_limit = 3000;
 
     let mut raw_chunks = Vec::new();
-    let lens_client = LensClient::new(None);
+
+    // Fetch proxy settings
+    let proxy_settings = get_proxy_settings(user.clone(), pass.clone()).await.ok().flatten();
+    
+    // Create LensClient with optional proxy
+    let lens_client = if let Some(ref proxy) = proxy_settings {
+        if proxy.socks_proxy_enabled && !proxy.socks_proxy_host.is_empty() {
+            // Build proxy URL with authentication if provided
+            let proxy_url = if let (Some(username), Some(password)) = 
+                (&proxy.socks_proxy_username, &proxy.socks_proxy_password) 
+            {
+                if !username.is_empty() && !password.is_empty() {
+                    format!(
+                        "socks{}://{}:{}@{}:{}",
+                        proxy.socks_proxy_version,
+                        username,
+                        password,
+                        proxy.socks_proxy_host,
+                        proxy.socks_proxy_port
+                    )
+                } else {
+                    format!(
+                        "socks{}://{}:{}",
+                        proxy.socks_proxy_version,
+                        proxy.socks_proxy_host,
+                        proxy.socks_proxy_port
+                    )
+                }
+            } else {
+                format!(
+                    "socks{}://{}:{}",
+                    proxy.socks_proxy_version,
+                    proxy.socks_proxy_host,
+                    proxy.socks_proxy_port
+                )
+            };
+            
+            tracing::info!("Using SOCKS{} proxy for Google Lens: {}:{}",
+                proxy.socks_proxy_version,
+                proxy.socks_proxy_host,
+                proxy.socks_proxy_port
+            );
+            
+            LensClient::new_with_proxy(None, Some(&proxy_url))
+                .map_err(|e| anyhow!("Failed to create LensClient with proxy: {}", e))?
+        } else {
+            LensClient::new(None)
+        }
+    } else {
+        LensClient::new(None)
+    };
 
     let mut current_y_position = 0;
     while current_y_position < full_image_height {
@@ -494,8 +615,8 @@ async fn fetch_and_process_internal(
     // 1. Fetch
     let client = reqwest::Client::new();
     let mut request = client.get(&target_url);
-    if let Some(username) = user {
-        request = request.basic_auth(username, pass);
+    if let Some(username) = &user {
+        request = request.basic_auth(username, pass.as_ref());
     }
     let response = request
         .send()
@@ -504,8 +625,8 @@ async fn fetch_and_process_internal(
         .map_err(|err| anyhow!("Failed error_for_status (URL: {target_url}): {err:?}"))?;
     let image_bytes = response.bytes().await?.to_vec();
 
-    // 2. Decode & OCR (Wrapped)
-    let raw_chunks = get_raw_ocr_data(&image_bytes).await?;
+    // 2. Decode & OCR (Wrapped) - now passes user/pass for proxy settings
+    let raw_chunks = get_raw_ocr_data(&image_bytes, user, pass).await?;
 
     // 3. Merge & Normalize
     let mut final_results = Vec::new();
